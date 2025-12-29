@@ -33,6 +33,15 @@
 - Fixed talkgroup parsing to allow `talkgroup=0` for test connections
 
 ### Database & Performance
+- **Removed MySQL/MariaDB support** - PostgreSQL is now the only supported database
+  - Deleted `mysql.go` and all MySQL/MariaDB-specific code
+  - PostgreSQL provides better concurrency, performance, and reliability for real-time operations
+  - See migration guide in documentation for upgrading from MySQL/MariaDB
+- **Dramatically improved call search performance** - Added composite index for 420x speed improvement
+  - Added composite index `callUnits_callId_idx` on `callUnits` table for `(callId, offset)`
+  - Reduced search query execution time from 23+ seconds to ~55ms (420x faster)
+  - Fixed N+1 query problem in call search where correlated subquery was performing 201 sequential scans
+  - Especially beneficial for mobile app call history searches
 - Added automatic PostgreSQL sequence reset to prevent duplicate key errors
 - Fixed sequence detection for case-sensitive table names (userGroups, registrationCodes)
 - Sequences now automatically reset to MAX(id) + 1 on server startup
@@ -66,6 +75,11 @@
 - Fixed talkgroup parsing to allow `talkgroup=0` for test connections
 
 **Database & Performance:**
+- **Removed MySQL/MariaDB support** - PostgreSQL is now the only supported database
+- **Dramatically improved call search performance** - 420x faster with new composite index
+  - Reduced search query execution time from 23+ seconds to ~55ms
+  - Added composite index on `callUnits` table for `(callId, offset)`
+  - Fixed N+1 query problem causing 201 sequential scans
 - Added automatic PostgreSQL sequence reset to prevent duplicate key errors
 - Fixed sequence detection for case-sensitive table names (userGroups, registrationCodes)
 - Sequences now automatically reset to MAX(id) + 1 on server startup
