@@ -11,7 +11,7 @@ server/tone-keyword-debug.log
 server/models/*.bin
 
 # Config files (use templates instead)
-config-sync/
+/config-sync/
 rdio-scanner.json
 rdio-scanner(2).json
 server/ThinlineRadio/
@@ -30,4 +30,8 @@ Thumbs.db
 # Temporary files
 *.log
 *.tmp
+
+# Separate repositories (Git managed independently)
+relay-server/
+ThinlineRadio-Mobile/
 
