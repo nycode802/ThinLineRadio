@@ -56,27 +56,27 @@ func (api *Api) isMobileAppRequest(r *http.Request) bool {
 	if userAgent == "" {
 		return false
 	}
-	
+
 	// Check for common mobile app identifiers
 	// Flutter/Dart HTTP client typically includes "Dart" in User-Agent
 	// Also check for common mobile app patterns
 	mobilePatterns := []string{
-		"Dart/",           // Flutter/Dart HTTP client
-		"Flutter",         // Flutter apps
-		"ThinLine",        // Your app name
-		"Thinline",        // Your app name (case variant)
-		"ohiorsn",         // Your app identifier
-		"Android",         // Android apps (though browsers also have this)
-		"CFNetwork",       // iOS networking library
+		"Dart/",     // Flutter/Dart HTTP client
+		"Flutter",   // Flutter apps
+		"ThinLine",  // Your app name
+		"Thinline",  // Your app name (case variant)
+		"ohiorsn",   // Your app identifier
+		"Android",   // Android apps (though browsers also have this)
+		"CFNetwork", // iOS networking library
 	}
-	
+
 	userAgentLower := strings.ToLower(userAgent)
 	for _, pattern := range mobilePatterns {
 		if strings.Contains(userAgentLower, strings.ToLower(pattern)) {
 			return true
 		}
 	}
-	
+
 	return false
 }
 
@@ -86,12 +86,12 @@ func (api *Api) verifyTurnstile(token, clientIP string, r *http.Request) (bool, 
 	if !api.Controller.Options.TurnstileEnabled {
 		return true, nil // Turnstile is disabled, so always succeed
 	}
-	
+
 	// Exempt mobile apps from Turnstile verification
 	if api.isMobileAppRequest(r) {
 		return true, nil // Mobile apps are exempt
 	}
-	
+
 	if api.Controller.Options.TurnstileSecretKey == "" {
 		return false, fmt.Errorf("Turnstile secret key not configured on scanner server")
 	}
@@ -207,7 +207,7 @@ func (api *Api) CallUploadHandler(w http.ResponseWriter, r *http.Request) {
 			api.HandleCall(key, call, w)
 		} else {
 			// Log full call data for debugging incomplete uploads
-			api.Controller.Logs.LogEvent(LogLevelWarn, fmt.Sprintf("api: Incomplete call data: %s | SystemId=%d TalkgroupId=%d AudioLen=%d Timestamp=%v SiteRef=%d Frequency=%d", 
+			api.Controller.Logs.LogEvent(LogLevelWarn, fmt.Sprintf("api: Incomplete call data: %s | SystemId=%d TalkgroupId=%d AudioLen=%d Timestamp=%v SiteRef=%d Frequency=%d",
 				err.Error(), call.SystemId, call.TalkgroupId, len(call.Audio), call.Timestamp, call.SiteRef, call.Frequency))
 			api.exitWithError(w, http.StatusExpectationFailed, fmt.Sprintf("Incomplete call data: %s\n", err.Error()))
 		}
@@ -245,7 +245,7 @@ func (api *Api) HandleCall(key string, call *Call, w http.ResponseWriter) {
 			call.System = system
 		}
 	}
-	
+
 	if call != nil && call.Talkgroup == nil && call.TalkgroupId > 0 && call.System != nil {
 		if talkgroup, ok := call.System.Talkgroups.GetTalkgroupByRef(call.TalkgroupId); ok {
 			call.Talkgroup = talkgroup
@@ -678,7 +678,7 @@ func (api *Api) UserRegisterHandler(w http.ResponseWriter, r *http.Request) {
 					break
 				}
 			}
-			
+
 			// If no active admin found, expire PIN immediately - user needs admin to subscribe
 			if !syncedFromAdmin {
 				user.SubscriptionStatus = "incomplete"
@@ -1969,11 +1969,11 @@ func (api *Api) CreateCheckoutSessionHandler(w http.ResponseWriter, r *http.Requ
 	checkoutSession, err := checkoutsession.New(params)
 	if err != nil {
 		log.Printf("Error creating Stripe checkout session: %v", err)
-		
+
 		// Check if this is a Stripe error about origin address or customer address for automatic tax
 		errorMessage := "Failed to create checkout session. Please contact support."
 		errStr := err.Error()
-		
+
 		// Check for specific error patterns in the error string
 		if strings.Contains(errStr, "origin address") || (strings.Contains(errStr, "automatic tax") && strings.Contains(errStr, "origin")) {
 			errorMessage = "Automatic tax requires a valid origin address to be configured in your Stripe dashboard. Please visit https://dashboard.stripe.com/test/settings/tax (test mode) or https://dashboard.stripe.com/settings/tax (live mode) to configure your business address."
@@ -1985,7 +1985,7 @@ func (api *Api) CreateCheckoutSessionHandler(w http.ResponseWriter, r *http.Requ
 				errorMessage = fmt.Sprintf("Stripe error: %s", errStr)
 			}
 		}
-		
+
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"error": errorMessage,
@@ -2060,7 +2060,6 @@ func (api *Api) AlertsHandler(w http.ResponseWriter, r *http.Request) {
 				sinceTimestamp = v
 			}
 		}
-
 
 		// Get user's alert preferences first (get all preferences, not just enabled ones)
 		// We'll filter by alertEnabled when checking individual alerts
@@ -2595,7 +2594,6 @@ func (api *Api) AlertsHandler(w http.ResponseWriter, r *http.Request) {
 			alerts = append(alerts, group.alerts...)
 		}
 
-
 		if b, err := json.Marshal(alerts); err == nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.Write(b)
@@ -2830,20 +2828,20 @@ func (api *Api) AlertPreferencesHandler(w http.ResponseWriter, r *http.Request) 
 				toneSetIds     []string
 			)
 
-		// Accept either systemId or systemRef field names
-		if v, ok := pref["systemId"].(float64); ok {
-			requestSystem = uint64(v)
-		}
-		if v, ok := pref["systemRef"].(float64); ok && requestSystem == 0 {
-			requestSystem = uint64(v)
-		}
-		// Accept either talkgroupId or talkgroupRef field names
-		if v, ok := pref["talkgroupId"].(float64); ok {
-			requestTg = uint64(v)
-		}
-		if v, ok := pref["talkgroupRef"].(float64); ok && requestTg == 0 {
-			requestTg = uint64(v)
-		}
+			// Accept either systemId or systemRef field names
+			if v, ok := pref["systemId"].(float64); ok {
+				requestSystem = uint64(v)
+			}
+			if v, ok := pref["systemRef"].(float64); ok && requestSystem == 0 {
+				requestSystem = uint64(v)
+			}
+			// Accept either talkgroupId or talkgroupRef field names
+			if v, ok := pref["talkgroupId"].(float64); ok {
+				requestTg = uint64(v)
+			}
+			if v, ok := pref["talkgroupRef"].(float64); ok && requestTg == 0 {
+				requestTg = uint64(v)
+			}
 			if v, ok := pref["alertEnabled"].(bool); ok {
 				alertEnabled = v
 			}
@@ -2883,33 +2881,33 @@ func (api *Api) AlertPreferencesHandler(w http.ResponseWriter, r *http.Request) 
 				}
 			}
 
-		// Resolve systemId: prefer systemRef, fallback to systemId
-		systemId = 0
-		// Try systemRef first to avoid collision (e.g., OH Geauga systemRef=28 vs OH Statewide MA systemId=28)
-		resolveSystemQuery := fmt.Sprintf(`SELECT "systemId" FROM "systems" WHERE "systemRef" = %d`, requestSystem)
-		if err := api.Controller.Database.Sql.QueryRow(resolveSystemQuery).Scan(&systemId); err != nil {
-			// Fallback: try as systemId
-			resolveSystemQuery = fmt.Sprintf(`SELECT "systemId" FROM "systems" WHERE "systemId" = %d`, requestSystem)
+			// Resolve systemId: prefer systemRef, fallback to systemId
+			systemId = 0
+			// Try systemRef first to avoid collision (e.g., OH Geauga systemRef=28 vs OH Statewide MA systemId=28)
+			resolveSystemQuery := fmt.Sprintf(`SELECT "systemId" FROM "systems" WHERE "systemRef" = %d`, requestSystem)
 			if err := api.Controller.Database.Sql.QueryRow(resolveSystemQuery).Scan(&systemId); err != nil {
-				api.Controller.Logs.LogEvent(LogLevelWarn, fmt.Sprintf("skipping preference: could not resolve systemId from value=%d", requestSystem))
-				continue
+				// Fallback: try as systemId
+				resolveSystemQuery = fmt.Sprintf(`SELECT "systemId" FROM "systems" WHERE "systemId" = %d`, requestSystem)
+				if err := api.Controller.Database.Sql.QueryRow(resolveSystemQuery).Scan(&systemId); err != nil {
+					api.Controller.Logs.LogEvent(LogLevelWarn, fmt.Sprintf("skipping preference: could not resolve systemId from value=%d", requestSystem))
+					continue
+				}
 			}
-		}
 
-		// Validate that talkgroup exists and get tone detection status (prefer talkgroupRef, fallback to talkgroupId)
-		var dbTalkgroupId uint64 = 0
-		var toneDetectionEnabled bool = false
-		// Try talkgroupRef first
-		verifyQuery := fmt.Sprintf(`SELECT "talkgroupId", "toneDetectionEnabled" FROM "talkgroups" WHERE "systemId" = %d AND "talkgroupRef" = %d`, systemId, requestTg)
-		if err := api.Controller.Database.Sql.QueryRow(verifyQuery).Scan(&dbTalkgroupId, &toneDetectionEnabled); err != nil {
-			// Fallback: try as talkgroupId
-			verifyQuery = fmt.Sprintf(`SELECT "talkgroupId", "toneDetectionEnabled" FROM "talkgroups" WHERE "systemId" = %d AND "talkgroupId" = %d`, systemId, requestTg)
+			// Validate that talkgroup exists and get tone detection status (prefer talkgroupRef, fallback to talkgroupId)
+			var dbTalkgroupId uint64 = 0
+			var toneDetectionEnabled bool = false
+			// Try talkgroupRef first
+			verifyQuery := fmt.Sprintf(`SELECT "talkgroupId", "toneDetectionEnabled" FROM "talkgroups" WHERE "systemId" = %d AND "talkgroupRef" = %d`, systemId, requestTg)
 			if err := api.Controller.Database.Sql.QueryRow(verifyQuery).Scan(&dbTalkgroupId, &toneDetectionEnabled); err != nil {
-				// Talkgroup doesn't exist, skip this preference
-				api.Controller.Logs.LogEvent(LogLevelWarn, fmt.Sprintf("skipping preference for non-existent talkgroup: systemId=%d, providedTalkgroup=%d", systemId, requestTg))
-				continue
+				// Fallback: try as talkgroupId
+				verifyQuery = fmt.Sprintf(`SELECT "talkgroupId", "toneDetectionEnabled" FROM "talkgroups" WHERE "systemId" = %d AND "talkgroupId" = %d`, systemId, requestTg)
+				if err := api.Controller.Database.Sql.QueryRow(verifyQuery).Scan(&dbTalkgroupId, &toneDetectionEnabled); err != nil {
+					// Talkgroup doesn't exist, skip this preference
+					api.Controller.Logs.LogEvent(LogLevelWarn, fmt.Sprintf("skipping preference for non-existent talkgroup: systemId=%d, providedTalkgroup=%d", systemId, requestTg))
+					continue
+				}
 			}
-		}
 
 			// If tone detection is not enabled for this talkgroup, disable tone alerts
 			if !toneDetectionEnabled && toneAlerts {
@@ -2919,6 +2917,30 @@ func (api *Api) AlertPreferencesHandler(w http.ResponseWriter, r *http.Request) 
 			keywordsJson, _ := json.Marshal(keywords)
 			keywordListIdsJson, _ := json.Marshal(keywordListIds)
 			toneSetIdsJson, _ := json.Marshal(toneSetIds)
+			
+			// Ensure we never store "null" for arrays - always use "[]" for empty arrays
+			if string(keywordsJson) == "null" {
+				keywordsJson = []byte("[]")
+			}
+			if string(keywordListIdsJson) == "null" {
+				keywordListIdsJson = []byte("[]")
+			}
+			if string(toneSetIdsJson) == "null" {
+				toneSetIdsJson = []byte("[]")
+			}
+
+			// DEBUG: Log tone set preferences being saved
+			if toneAlerts {
+				meaning := "ALL TONE SETS"
+				if len(toneSetIds) > 0 {
+					meaning = fmt.Sprintf("SPECIFIC: %v", toneSetIds)
+				}
+				api.Controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("💾 [TONE SET DEBUG] Saving preference for user %d, system %d, talkgroup %d: %s (alertEnabled=%t)", client.User.Id, systemId, dbTalkgroupId, meaning, alertEnabled))
+				api.Controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("💾 [TONE SET DEBUG] JSON being stored: %s", string(toneSetIdsJson)))
+			} else if alertEnabled {
+				// Alert is enabled but tone alerts are off (maybe just keyword alerts)
+				api.Controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("💾 [TONE SET DEBUG] Saving preference for user %d, system %d, talkgroup %d: toneAlerts=false (only keyword alerts)", client.User.Id, systemId, dbTalkgroupId))
+			}
 
 			// Upsert preference using verified database talkgroupId
 			query := fmt.Sprintf(`INSERT INTO "userAlertPreferences" ("userId", "systemId", "talkgroupId", "alertEnabled", "toneAlerts", "keywordAlerts", "keywords", "keywordListIds", "toneSetIds") VALUES (%d, %d, %d, %t, %t, %t, $1, $2, $3) ON CONFLICT ("userId", "systemId", "talkgroupId") DO UPDATE SET "alertEnabled" = %t, "toneAlerts" = %t, "keywordAlerts" = %t, "keywords" = $1, "keywordListIds" = $2, "toneSetIds" = $3`, client.User.Id, systemId, dbTalkgroupId, alertEnabled, toneAlerts, keywordAlerts, alertEnabled, toneAlerts, keywordAlerts)
@@ -3896,9 +3918,8 @@ func (api *Api) AccountUpdatePasswordHandler(w http.ResponseWriter, r *http.Requ
 	}
 
 	var request struct {
-		CurrentPassword string `json:"currentPassword"`
-		NewPassword     string `json:"newPassword"`
-		Code            string `json:"code"` // Password change verification code
+		NewPassword string `json:"newPassword"`
+		Code        string `json:"code"` // Password change verification code
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
@@ -3907,19 +3928,13 @@ func (api *Api) AccountUpdatePasswordHandler(w http.ResponseWriter, r *http.Requ
 	}
 
 	// Validate input
-	if request.CurrentPassword == "" || request.NewPassword == "" {
-		api.exitWithError(w, http.StatusBadRequest, "Current password and new password are required")
+	if request.NewPassword == "" {
+		api.exitWithError(w, http.StatusBadRequest, "New password is required")
 		return
 	}
 
 	if request.Code == "" {
 		api.exitWithError(w, http.StatusBadRequest, "Verification code is required")
-		return
-	}
-
-	// Verify current password
-	if !user.VerifyPassword(request.CurrentPassword) {
-		api.exitWithError(w, http.StatusUnauthorized, "Invalid current password")
 		return
 	}
 
@@ -4464,7 +4479,7 @@ func (api *Api) GroupAdminAddUserHandler(w http.ResponseWriter, r *http.Request)
 						break
 					}
 				}
-				
+
 				// If no active admin found, expire PIN immediately - user needs admin to subscribe
 				if !syncedFromAdmin {
 					user.SubscriptionStatus = "incomplete"
@@ -4660,7 +4675,7 @@ func (api *Api) GroupAdminAddExistingUserHandler(w http.ResponseWriter, r *http.
 				break
 			}
 		}
-		
+
 		// If no active admin found, expire PIN immediately - user needs admin to subscribe
 		if !syncedFromAdmin {
 			user.SubscriptionStatus = "incomplete"
@@ -5673,7 +5688,7 @@ func (api *Api) AdminDeleteGroupHandler(w http.ResponseWriter, r *http.Request) 
 
 	// Wait 1 second to ensure database transaction visibility across connection pool
 	time.Sleep(1 * time.Second)
-	
+
 	// Reload groups from database to ensure in-memory state matches DB after deletion
 	if err := api.Controller.UserGroups.Load(api.Controller.Database); err != nil {
 		log.Printf("WARNING: Failed to reload groups after delete: %v", err)

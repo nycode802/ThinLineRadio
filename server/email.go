@@ -1367,8 +1367,8 @@ func (es *EmailService) SendEmailChangeVerificationEmail(user *User, verificatio
 		borderRadius = "0px"
 	}
 
-	// Generate email HTML (reuse password reset template style)
-	htmlBody := getPasswordResetEmailHTML(verificationCode, branding, logoURL, borderRadius)
+	// Generate email HTML using email change verification code template
+	htmlBody := getEmailChangeVerificationCodeHTML(verificationCode, branding, logoURL)
 
 	// Set up email headers
 	fromEmail := es.Controller.Options.EmailSmtpFromEmail
@@ -1483,6 +1483,204 @@ func (es *EmailService) SendNewEmailVerificationEmail(newEmail, verificationToke
 
 	log.Printf("✅ New email verification sent successfully to %s", newEmail)
 	return nil
+}
+
+// getEmailChangeVerificationCodeHTML generates the HTML content for email change verification code emails
+func getEmailChangeVerificationCodeHTML(verificationCode, branding, logoURL string) string {
+	if branding == "" {
+		branding = "ThinLine Radio"
+	}
+	
+	htmlTemplate := `<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Email Change Verification Code - {{.Branding}}</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background-color: #ffffff;
+            border-radius: 12px;
+            padding: 0;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+        .header {
+            background: #2c2c2c;
+            color: white;
+            text-align: center;
+            padding: 40px 20px;
+        }
+        .logo-img {
+            max-width: 200px;
+            height: auto;
+            margin: 0 auto 15px auto;
+            display: block;
+        }
+        .logo-icon {
+            font-size: 64px;
+            margin: 0 auto 15px auto;
+            display: block;
+            text-align: center;
+        }
+        h1 {
+            color: white;
+            margin: 0;
+            font-size: 28px;
+            font-weight: 600;
+        }
+        .content {
+            padding: 40px;
+        }
+        .content p {
+            margin: 0 0 15px 0;
+            color: #555;
+            font-size: 16px;
+        }
+        .content p:first-child {
+            font-size: 18px;
+            color: #333;
+        }
+        .code-box {
+            background-color: #f8f9fa;
+            border: 2px solid #2c2c2c;
+            border-radius: 8px;
+            padding: 20px;
+            margin: 30px 0;
+            text-align: center;
+        }
+        .code {
+            font-size: 36px;
+            font-weight: 700;
+            color: #2c2c2c;
+            letter-spacing: 8px;
+            font-family: 'Courier New', monospace;
+        }
+        .expiry-note {
+            background-color: #fff3cd;
+            border-left: 4px solid #ffc107;
+            padding: 12px 15px;
+            margin: 20px 0;
+            font-size: 14px;
+            color: #856404;
+        }
+        .security-note {
+            background-color: #f8f9fa;
+            border-left: 4px solid #6c757d;
+            padding: 12px 15px;
+            margin: 20px 0;
+            font-size: 14px;
+            color: #495057;
+        }
+        .footer {
+            text-align: center;
+            padding: 30px 40px;
+            background-color: #f8f9fa;
+            border-top: 1px solid #e9ecef;
+        }
+        .footer-icon {
+            font-size: 32px;
+            margin-bottom: 10px;
+        }
+        .footer p {
+            margin: 5px 0;
+            font-size: 13px;
+            color: #6c757d;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            {{if .LogoURL}}
+                <img src="{{.LogoURL}}" alt="{{.Branding}}" class="logo-img">
+            {{else}}
+                <div class="logo-icon">📻</div>
+            {{end}}
+            <h1>{{.Branding}}</h1>
+        </div>
+        <div class="content">
+            <p><strong>Email Change Verification</strong></p>
+            <p>You've requested to change your email address for your {{.Branding}} account. To proceed with the email change, please use the verification code below:</p>
+            
+            <div class="code-box">
+                <div class="code">{{.VerificationCode}}</div>
+            </div>
+            
+            <div class="expiry-note">
+                ⏰ This verification code will expire in 15 minutes.
+            </div>
+            
+            <div class="security-note">
+                🔒 If you didn't request an email change, please contact support immediately to secure your account. Do not share this code with anyone.
+            </div>
+            
+            <p style="font-size: 14px; color: #6c757d;">
+                Enter this code in the email change form to verify your identity and complete the email change.
+            </p>
+        </div>
+        <div class="footer">
+            {{if .LogoURL}}
+                <img src="{{.LogoURL}}" alt="{{.Branding}}" style="max-width: 100px; height: auto; display: block; margin: 0 auto;">
+            {{else}}
+                <div class="footer-icon">📻</div>
+            {{end}}
+        </div>
+    </div>
+</body>
+</html>`
+
+	tmpl, err := template.New("emailChangeVerificationCode").Parse(htmlTemplate)
+	if err != nil {
+		// Fallback to simple HTML if template parsing fails
+		return fmt.Sprintf(`
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"></head>
+<body>
+    <h1>Email Change Verification Code</h1>
+    <p>Your email change verification code is: <strong>%s</strong></p>
+    <p>This code will expire in 15 minutes.</p>
+    <p>If you didn't request this change, please contact support immediately.</p>
+</body>
+</html>`, verificationCode)
+	}
+
+	var buf bytes.Buffer
+	data := struct {
+		Branding         string
+		VerificationCode string
+		LogoURL          string
+	}{
+		Branding:         branding,
+		VerificationCode: verificationCode,
+		LogoURL:          logoURL,
+	}
+
+	if err := tmpl.Execute(&buf, data); err != nil {
+		return fmt.Sprintf(`
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"></head>
+<body>
+    <h1>Email Change Verification Code</h1>
+    <p>Your email change verification code is: <strong>%s</strong></p>
+    <p>This code will expire in 15 minutes.</p>
+    <p>If you didn't request this change, please contact support immediately.</p>
+</body>
+</html>`, verificationCode)
+	}
+
+	return buf.String()
 }
 
 // getPasswordChangeVerificationEmailHTML generates the HTML content for password change verification code emails

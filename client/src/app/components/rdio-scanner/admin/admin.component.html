@@ -27,6 +27,15 @@
             </mat-expansion-panel-header>
             <rdio-scanner-admin-logs #logsComponent></rdio-scanner-admin-logs>
         </mat-expansion-panel>
+        <mat-expansion-panel>
+            <mat-expansion-panel-header>
+                <mat-panel-title>
+                    <mat-icon>health_and_safety</mat-icon>
+                    System Health
+                </mat-panel-title>
+            </mat-expansion-panel-header>
+            <rdio-scanner-admin-system-health></rdio-scanner-admin-system-health>
+        </mat-expansion-panel>
         <mat-expansion-panel (afterCollapse)="toolsComponent?.closeAll()">
             <mat-expansion-panel-header>
                 <mat-panel-title>

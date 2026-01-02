@@ -60,6 +60,7 @@ import { RdioScannerAdminPasswordComponent } from './tools/password/password.com
 import { RdioScannerAdminRadioReferenceImportComponent } from './tools/radio-reference-import/radio-reference-import.component';
 import { RdioScannerAdminConfigSyncComponent } from './tools/config-sync/config-sync.component';
 import { RdioScannerAdminStripeSyncComponent } from './tools/stripe-sync/stripe-sync.component';
+import { RdioScannerAdminSystemHealthComponent } from './system-health/system-health.component';
 
 @NgModule({
     declarations: [
@@ -99,6 +100,7 @@ import { RdioScannerAdminStripeSyncComponent } from './tools/stripe-sync/stripe-
         RdioScannerAdminKeywordListsComponent,
         RdioScannerAdminConfigSyncComponent,
         RdioScannerAdminStripeSyncComponent,
+        RdioScannerAdminSystemHealthComponent,
     ],
     entryComponents: [RdioScannerAdminSystemsSelectComponent],
     exports: [RdioScannerAdminComponent],

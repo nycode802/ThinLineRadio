@@ -1676,6 +1676,7 @@ func migrateToneDetection(db *Database) error {
 		`ALTER TABLE "calls" ADD COLUMN IF NOT EXISTS "transcript" text NOT NULL DEFAULT ''`,
 		`ALTER TABLE "calls" ADD COLUMN IF NOT EXISTS "transcriptConfidence" real NOT NULL DEFAULT 0.0`,
 		`ALTER TABLE "calls" ADD COLUMN IF NOT EXISTS "transcriptionStatus" text NOT NULL DEFAULT 'pending'`,
+		`ALTER TABLE "calls" ADD COLUMN IF NOT EXISTS "transcriptionFailureReason" text NOT NULL DEFAULT ''`,
 	}
 	for _, query := range queries {
 		if _, err := db.Sql.Exec(query); err != nil {

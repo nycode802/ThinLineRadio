@@ -38,6 +38,7 @@ type Tone struct {
 	StartTime float64 `json:"startTime"` // seconds from start of audio
 	EndTime   float64 `json:"endTime"`   // seconds from start of audio
 	Duration  float64 `json:"duration"`  // seconds
+	ToneType  string  `json:"toneType"`  // Type of tone: "A", "B", "Long", or "" if matched multiple/none
 }
 
 // ToneSet represents a configured set of tones for a talkgroup
@@ -77,6 +78,7 @@ type PendingToneSequence struct {
 	Timestamp    int64 // Unix millisecond timestamp when tones were detected
 	SystemId     uint64
 	TalkgroupId  uint64
+	Locked       bool  // When true, prevents new tones from merging (claimed by transcribing call)
 }
 
 // ToneDetector handles tone detection in audio calls
@@ -175,18 +177,23 @@ func (detector *ToneDetector) Detect(audio []byte, audioMime string, toneSets []
 		Duration: float64(len(samples)) / float64(sampleRate),
 	}
 
-	// Identify ATone, BTone, LongTone if present
-	if len(detectedTones) >= 1 {
-		sequence.ATone = &detectedTones[0]
-	}
-	if len(detectedTones) >= 2 {
-		sequence.BTone = &detectedTones[1]
-	}
-	// Long tones are typically > 3 seconds
+	// Identify ATone, BTone, LongTone based on what they matched in the tone sets
+	// Use the ToneType field that was set during matching
 	for i := range detectedTones {
-		if detectedTones[i].Duration >= 3.0 {
-			sequence.LongTone = &detectedTones[i]
-			break
+		tone := &detectedTones[i]
+		switch tone.ToneType {
+		case "A":
+			if sequence.ATone == nil {
+				sequence.ATone = tone
+			}
+		case "B":
+			if sequence.BTone == nil {
+				sequence.BTone = tone
+			}
+		case "Long":
+			if sequence.LongTone == nil {
+				sequence.LongTone = tone
+			}
 		}
 	}
 
@@ -441,6 +448,7 @@ func (detector *ToneDetector) analyzeFrequencies(samples []float64, sampleRate i
 
 		// Check if frequency matches ANY configured tone set (check ALL, don't stop at first match)
 		matchedToneSets := []string{} // Track all matches for logging
+		matchedTypes := make(map[string]bool) // Track which types this tone matched (A, B, Long)
 		matched := false
 
 		for _, toneSet := range toneSets {
@@ -456,10 +464,14 @@ func (detector *ToneDetector) analyzeFrequencies(samples []float64, sampleRate i
 				}
 				freqDiff := math.Abs(md.frequency - toneSet.ATone.Frequency)
 				if freqDiff <= actualTolerance && duration >= toneSet.ATone.MinDuration {
-					matched = true
-					matchInfo := fmt.Sprintf("%s A-tone (%.1f Hz, tol: ±%.1f Hz, diff: %.1f Hz)", toneSet.Label, toneSet.ATone.Frequency, actualTolerance, freqDiff)
-					matchedToneSets = append(matchedToneSets, matchInfo)
-					// Continue checking other tone sets - DON'T BREAK
+					// Check MaxDuration if specified (0 = unlimited)
+					if toneSet.ATone.MaxDuration == 0 || duration <= toneSet.ATone.MaxDuration {
+						matched = true
+						matchedTypes["A"] = true
+						matchInfo := fmt.Sprintf("%s A-tone (%.1f Hz, tol: ±%.1f Hz, diff: %.1f Hz)", toneSet.Label, toneSet.ATone.Frequency, actualTolerance, freqDiff)
+						matchedToneSets = append(matchedToneSets, matchInfo)
+						// Continue checking other tone sets - DON'T BREAK
+					}
 				}
 			}
 
@@ -472,10 +484,14 @@ func (detector *ToneDetector) analyzeFrequencies(samples []float64, sampleRate i
 				}
 				freqDiff := math.Abs(md.frequency - toneSet.BTone.Frequency)
 				if freqDiff <= actualTolerance && duration >= toneSet.BTone.MinDuration {
-					matched = true
-					matchInfo := fmt.Sprintf("%s B-tone (%.1f Hz, tol: ±%.1f Hz, diff: %.1f Hz)", toneSet.Label, toneSet.BTone.Frequency, actualTolerance, freqDiff)
-					matchedToneSets = append(matchedToneSets, matchInfo)
-					// Continue checking other tone sets - DON'T BREAK
+					// Check MaxDuration if specified (0 = unlimited)
+					if toneSet.BTone.MaxDuration == 0 || duration <= toneSet.BTone.MaxDuration {
+						matched = true
+						matchedTypes["B"] = true
+						matchInfo := fmt.Sprintf("%s B-tone (%.1f Hz, tol: ±%.1f Hz, diff: %.1f Hz)", toneSet.Label, toneSet.BTone.Frequency, actualTolerance, freqDiff)
+						matchedToneSets = append(matchedToneSets, matchInfo)
+						// Continue checking other tone sets - DON'T BREAK
+					}
 				}
 			}
 
@@ -488,11 +504,29 @@ func (detector *ToneDetector) analyzeFrequencies(samples []float64, sampleRate i
 				}
 				freqDiff := math.Abs(md.frequency - toneSet.LongTone.Frequency)
 				if freqDiff <= actualTolerance && duration >= toneSet.LongTone.MinDuration {
-					matched = true
-					matchInfo := fmt.Sprintf("%s long-tone (%.1f Hz, tol: ±%.1f Hz, diff: %.1f Hz)", toneSet.Label, toneSet.LongTone.Frequency, actualTolerance, freqDiff)
-					matchedToneSets = append(matchedToneSets, matchInfo)
-					// Continue checking other tone sets - DON'T BREAK
+					// Check MaxDuration if specified (0 = unlimited)
+					if toneSet.LongTone.MaxDuration == 0 || duration <= toneSet.LongTone.MaxDuration {
+						matched = true
+						matchedTypes["Long"] = true
+						matchInfo := fmt.Sprintf("%s long-tone (%.1f Hz, tol: ±%.1f Hz, diff: %.1f Hz)", toneSet.Label, toneSet.LongTone.Frequency, actualTolerance, freqDiff)
+						matchedToneSets = append(matchedToneSets, matchInfo)
+						// Continue checking other tone sets - DON'T BREAK
+					}
 				}
+			}
+		}
+
+		// Determine tone type based on what it matched
+		// If it matches multiple types, leave empty (ambiguous)
+		// If it matches only one type, use that
+		toneType := ""
+		if len(matchedTypes) == 1 {
+			if matchedTypes["A"] {
+				toneType = "A"
+			} else if matchedTypes["B"] {
+				toneType = "B"
+			} else if matchedTypes["Long"] {
+				toneType = "Long"
 			}
 		}
 
@@ -508,6 +542,7 @@ func (detector *ToneDetector) analyzeFrequencies(samples []float64, sampleRate i
 				StartTime: md.startTime,
 				EndTime:   md.endTime,
 				Duration:  duration,
+				ToneType:  toneType,
 			})
 		} else {
 			// Log what we were looking for vs what was detected
@@ -835,4 +870,151 @@ func SerializeToneSequence(toneSequence *ToneSequence) (string, error) {
 	}
 
 	return string(data), nil
+}
+
+// RemoveTonesFromAudio removes detected tone segments from audio file using ffmpeg
+// Returns filtered audio (without tones) for transcription, or original audio if filtering fails
+// This prevents tone hallucinations in transcripts while preserving original audio for playback
+func (detector *ToneDetector) RemoveTonesFromAudio(audio []byte, audioMime string, tones []Tone) ([]byte, error) {
+	if len(tones) == 0 {
+		return audio, nil // No tones to remove
+	}
+
+	// Create temp files
+	tempDir := os.TempDir()
+	srcFile := filepath.Join(tempDir, fmt.Sprintf("tone_filter_src_%d.m4a", time.Now().UnixNano()))
+	outFile := filepath.Join(tempDir, fmt.Sprintf("tone_filter_out_%d.m4a", time.Now().UnixNano()))
+
+	// Write source audio
+	if err := os.WriteFile(srcFile, audio, 0644); err != nil {
+		return audio, fmt.Errorf("failed to write temp audio: %v", err)
+	}
+	defer os.Remove(srcFile)
+	defer os.Remove(outFile)
+
+	// Get total audio duration
+	durationCmd := exec.Command("ffprobe", 
+		"-v", "error",
+		"-show_entries", "format=duration",
+		"-of", "default=noprint_wrappers=1:nokey=1",
+		srcFile,
+	)
+	durationOutput, err := durationCmd.Output()
+	if err != nil {
+		return audio, fmt.Errorf("failed to get audio duration: %v", err)
+	}
+	
+	var totalDuration float64
+	if _, err := fmt.Sscanf(string(durationOutput), "%f", &totalDuration); err != nil {
+		return audio, fmt.Errorf("failed to parse duration: %v", err)
+	}
+
+	// Build ffmpeg filter to remove tone segments
+	// Strategy: Keep all audio EXCEPT the tone segments
+	// Use select filter to keep only segments we want
+	
+	// Sort tones by start time
+	sortedTones := make([]Tone, len(tones))
+	copy(sortedTones, tones)
+	sort.Slice(sortedTones, func(i, j int) bool {
+		return sortedTones[i].StartTime < sortedTones[j].StartTime
+	})
+
+	// Build segments to KEEP (everything except tones)
+	// Add small buffer (0.1s) around tones to ensure complete removal
+	const toneBuffer = 0.1
+	
+	type segment struct {
+		start, end float64
+	}
+	var keepSegments []segment
+	
+	currentPos := 0.0
+	for _, tone := range sortedTones {
+		toneStart := math.Max(0, tone.StartTime-toneBuffer)
+		toneEnd := math.Min(totalDuration, tone.EndTime+toneBuffer)
+		
+		// Add segment before this tone
+		if currentPos < toneStart {
+			keepSegments = append(keepSegments, segment{currentPos, toneStart})
+		}
+		
+		// Skip the tone itself
+		currentPos = toneEnd
+	}
+	
+	// Add final segment after last tone
+	if currentPos < totalDuration {
+		keepSegments = append(keepSegments, segment{currentPos, totalDuration})
+	}
+
+	// If no segments to keep, return empty (all tones)
+	if len(keepSegments) == 0 {
+		fmt.Printf("audio filtering: all audio is tones, returning original\n")
+		return audio, nil
+	}
+
+	// Build ffmpeg filter complex
+	// Use select filter to extract segments, then concat them
+	var filterParts []string
+	for i, seg := range keepSegments {
+		// between(t,start,end) selects frames in time range
+		filterParts = append(filterParts, fmt.Sprintf("[0:a]atrim=start=%.3f:end=%.3f,asetpts=PTS-STARTPTS[a%d]", 
+			seg.start, seg.end, i))
+	}
+	
+	// Concat all segments
+	concatInputs := ""
+	for i := range keepSegments {
+		concatInputs += fmt.Sprintf("[a%d]", i)
+	}
+	filterComplex := strings.Join(filterParts, ";") + fmt.Sprintf(";%sconcat=n=%d:v=0:a=1[out]", 
+		concatInputs, len(keepSegments))
+
+	// Run ffmpeg with filter
+	ffArgs := []string{
+		"-y", "-loglevel", "error",
+		"-i", srcFile,
+		"-filter_complex", filterComplex,
+		"-map", "[out]",
+		"-c:a", "aac", // Encode to AAC
+		"-b:a", "64k", // Low bitrate for transcription (quality doesn't matter much)
+		outFile,
+	}
+
+	fmt.Printf("audio filtering: removing %d tone segments (%.2fs of tones from %.2fs total)\n", 
+		len(sortedTones), calculateTotalToneDuration(sortedTones), totalDuration)
+
+	ffCmd := exec.Command("ffmpeg", ffArgs...)
+	var ffErr bytes.Buffer
+	ffCmd.Stderr = &ffErr
+	if err := ffCmd.Run(); err != nil {
+		return audio, fmt.Errorf("ffmpeg filtering failed: %v, stderr: %s", err, ffErr.String())
+	}
+
+	// Read filtered audio
+	filteredAudio, err := os.ReadFile(outFile)
+	if err != nil {
+		return audio, fmt.Errorf("failed to read filtered audio: %v", err)
+	}
+
+	// Verify we got something back
+	if len(filteredAudio) < 1000 {
+		fmt.Printf("audio filtering: filtered audio too small (%d bytes), returning original\n", len(filteredAudio))
+		return audio, nil
+	}
+
+	fmt.Printf("audio filtering: success - original: %d bytes, filtered: %d bytes (removed %.1f%%)\n", 
+		len(audio), len(filteredAudio), (1.0-float64(len(filteredAudio))/float64(len(audio)))*100)
+
+	return filteredAudio, nil
+}
+
+// calculateTotalToneDuration calculates total duration of all tones
+func calculateTotalToneDuration(tones []Tone) float64 {
+	total := 0.0
+	for _, tone := range tones {
+		total += tone.Duration
+	}
+	return total
 }

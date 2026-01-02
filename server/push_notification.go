@@ -130,7 +130,15 @@ func (controller *Controller) sendPushNotification(userId uint64, alertType stri
 		message = strings.ToUpper(call.Transcript)
 	} else {
 		// Fallback to alert type info if no transcript
-		if alertType == "tone" {
+		if alertType == "pre-alert" {
+			// Pre-alert: Tones detected, waiting for voice
+			currentTime := time.Now().Format("3:04 PM")
+			if toneSetName != "" {
+				message = fmt.Sprintf("%s Tones Detected @ %s", strings.ToUpper(toneSetName), currentTime)
+			} else {
+				message = fmt.Sprintf("Tones Detected @ %s", currentTime)
+			}
+		} else if alertType == "tone" {
 			if len(keywords) > 0 {
 				// Tone alert with keywords - include keyword info
 				keywordText := strings.ToUpper(keywords[0])
@@ -187,7 +195,7 @@ func (controller *Controller) sendPushNotification(userId uint64, alertType stri
 
 	// Build subtitle for tone alerts
 	subtitle := ""
-	if alertType == "tone" || alertType == "tone+keyword" {
+	if alertType == "pre-alert" || alertType == "tone" || alertType == "tone+keyword" {
 		if toneSetName != "" {
 			subtitle = strings.ToUpper(toneSetName)
 			controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("push notification: setting subtitle '%s' for %s alert", subtitle, alertType))
@@ -384,7 +392,15 @@ func (controller *Controller) sendBatchedPushNotification(userIds []uint64, aler
 		message = strings.ToUpper(call.Transcript)
 	} else {
 		// Fallback to alert type info if no transcript
-		if alertType == "tone" {
+		if alertType == "pre-alert" {
+			// Pre-alert: Tones detected, waiting for voice
+			currentTime := time.Now().Format("3:04 PM")
+			if toneSetName != "" {
+				message = fmt.Sprintf("%s Tones Detected @ %s", strings.ToUpper(toneSetName), currentTime)
+			} else {
+				message = fmt.Sprintf("Tones Detected @ %s", currentTime)
+			}
+		} else if alertType == "tone" {
 			if len(keywords) > 0 {
 				// Tone alert with keywords - include keyword info
 				keywordText := strings.ToUpper(keywords[0])

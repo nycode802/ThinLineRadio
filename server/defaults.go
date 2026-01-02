@@ -93,6 +93,8 @@ type DefaultOptions struct {
 	stripePriceId               string
 	baseUrl                     string
 	transcriptionConfig         DefaultTranscriptionConfig
+	transcriptionFailureThreshold uint
+	toneDetectionIssueThreshold uint
 	alertRetentionDays          uint
 	adminLocalhostOnly          bool
 	configSyncEnabled           bool
@@ -200,7 +202,9 @@ var defaults = Defaults{
 			language:       "en",       // English by default
 			workerPoolSize: 3,          // Conservative default
 		},
-		alertRetentionDays: 30,
+		transcriptionFailureThreshold: 10,
+		toneDetectionIssueThreshold: 5,
+		alertRetentionDays: 5,
 		adminLocalhostOnly: false, // Default to false for backwards compatibility
 		configSyncEnabled:  false,
 		configSyncPath:     "",

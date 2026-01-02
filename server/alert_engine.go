@@ -33,6 +33,155 @@ func NewAlertEngine(controller *Controller) *AlertEngine {
 	}
 }
 
+// TriggerPreAlerts triggers immediate pre-alerts when tones are detected (before transcription)
+// This allows users to be notified immediately without waiting for voice confirmation
+func (engine *AlertEngine) TriggerPreAlerts(call *Call) {
+	if call == nil || !call.HasTones {
+		return
+	}
+
+	// Get all matched tone sets from this call
+	matchedToneSets := call.ToneSequence.MatchedToneSets
+	if len(matchedToneSets) == 0 {
+		// Fallback to singular MatchedToneSet for backward compatibility
+		if call.ToneSequence.MatchedToneSet == nil {
+			return
+		}
+		matchedToneSets = []*ToneSet{call.ToneSequence.MatchedToneSet}
+	}
+
+	// Get all users with tone alerts enabled for this talkgroup
+	var query string
+	if engine.controller.Database.Config.DbType == DbTypePostgresql {
+		query = `SELECT "userId", "toneAlerts", "toneSetIds" FROM "userAlertPreferences" WHERE "systemId" = $1 AND "talkgroupId" = $2 AND "alertEnabled" = true AND "toneAlerts" = true`
+	} else {
+		query = `SELECT "userId", "toneAlerts", "toneSetIds" FROM "userAlertPreferences" WHERE "systemId" = ? AND "talkgroupId" = ? AND "alertEnabled" = true AND "toneAlerts" = true`
+	}
+	rows, err := engine.controller.Database.Sql.Query(query, call.System.Id, call.Talkgroup.Id)
+	if err != nil {
+		engine.controller.Logs.LogEvent(LogLevelWarn, fmt.Sprintf("failed to query user alert preferences for pre-alerts: %v", err))
+		return
+	}
+	defer rows.Close()
+
+	// Collect user preferences
+	type userPref struct {
+		userId             uint64
+		selectedToneSetIds map[string]bool // If empty, user wants all tone sets
+	}
+	var users []userPref
+
+	for rows.Next() {
+		var userId uint64
+		var toneAlerts bool
+		var toneSetIdsJson string
+
+		if err := rows.Scan(&userId, &toneAlerts, &toneSetIdsJson); err != nil {
+			continue
+		}
+
+		pref := userPref{
+			userId:             userId,
+			selectedToneSetIds: make(map[string]bool),
+		}
+
+		// Parse user's selected tone set IDs
+		if toneSetIdsJson != "" && toneSetIdsJson != "[]" && toneSetIdsJson != "null" {
+			var toneSetIds []string
+			if err := json.Unmarshal([]byte(toneSetIdsJson), &toneSetIds); err == nil {
+				for _, id := range toneSetIds {
+					pref.selectedToneSetIds[id] = true
+				}
+				// DEBUG: Log what user selected
+				engine.controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("pre-alert: user %d has selected specific tone sets: %v", userId, toneSetIds))
+			}
+		} else {
+			// DEBUG: Log that user wants all tone sets
+			engine.controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("pre-alert: user %d wants ALL tone sets (none selected)", userId))
+		}
+
+		users = append(users, pref)
+	}
+
+	if len(users) == 0 {
+		engine.controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("no users with tone alerts enabled for pre-alert on call %d", call.Id))
+		return
+	}
+
+	// Get system and talkgroup labels once
+	systemLabel := ""
+	talkgroupLabel := ""
+	if call.System != nil {
+		systemLabel = call.System.Label
+	}
+	if call.Talkgroup != nil {
+		talkgroupLabel = call.Talkgroup.Label
+	}
+
+	// Create one pre-alert per matched tone set
+	for _, matchedToneSet := range matchedToneSets {
+		if matchedToneSet == nil || matchedToneSet.Id == "" {
+			continue
+		}
+
+		// DEBUG: Log detected tone set details
+		engine.controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("🔔 [TONE SET DEBUG] Pre-alert processing: Detected tone set ID='%s', Label='%s' on call %d", matchedToneSet.Id, matchedToneSet.Label, call.Id))
+
+		// Check if pre-alert already exists for this call + tone set combination
+		var existingAlertId uint64
+		var checkQuery string
+		if engine.controller.Database.Config.DbType == DbTypePostgresql {
+			checkQuery = `SELECT "alertId" FROM "alerts" WHERE "callId" = $1 AND "systemId" = $2 AND "talkgroupId" = $3 AND "alertType" = 'pre-alert' AND "toneSetId" = $4 LIMIT 1`
+		} else {
+			checkQuery = `SELECT "alertId" FROM "alerts" WHERE "callId" = ? AND "systemId" = ? AND "talkgroupId" = ? AND "alertType" = 'pre-alert' AND "toneSetId" = ? LIMIT 1`
+		}
+		if err := engine.controller.Database.Sql.QueryRow(checkQuery, call.Id, call.System.Id, call.Talkgroup.Id, matchedToneSet.Id).Scan(&existingAlertId); err == nil {
+			// Pre-alert already exists, skip
+			engine.controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("pre-alert already exists for call %d, tone set %s", call.Id, matchedToneSet.Label))
+			continue
+		}
+
+		// Create pre-alert for this tone set
+		engine.createAlert(&AlertRecord{
+			CallId:       call.Id,
+			SystemId:     call.System.Id,
+			TalkgroupId:  call.Talkgroup.Id,
+			AlertType:    "pre-alert",
+			ToneDetected: true,
+			ToneSetId:    matchedToneSet.Id,
+			CreatedAt:    time.Now().UnixMilli(),
+		})
+
+		engine.controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("created pre-alert for call %d, tone set '%s'", call.Id, matchedToneSet.Label))
+
+		// Collect users who should get notifications for this tone set
+		var eligibleUsers []uint64
+		for _, user := range users {
+			// Check if user wants this specific tone set
+			// If user has no selected tone sets (empty map), they want all tone sets
+			if len(user.selectedToneSetIds) == 0 {
+				// User wants all tone sets
+				eligibleUsers = append(eligibleUsers, user.userId)
+				engine.controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("pre-alert: user %d gets alert for '%s' (wants all tone sets)", user.userId, matchedToneSet.Label))
+			} else if user.selectedToneSetIds[matchedToneSet.Id] {
+				// User selected this specific tone set
+				eligibleUsers = append(eligibleUsers, user.userId)
+				engine.controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("pre-alert: user %d gets alert for '%s' (selected this tone set)", user.userId, matchedToneSet.Label))
+			} else {
+				// User did NOT select this tone set - skip
+				engine.controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("pre-alert: user %d SKIPPED for '%s' (not in selected tone sets)", user.userId, matchedToneSet.Label))
+			}
+		}
+
+		// Send batched push notification for all eligible users
+		if len(eligibleUsers) > 0 {
+			toneSetName := matchedToneSet.Label
+			engine.controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("sending pre-alert notifications to %d users for tone set '%s'", len(eligibleUsers), toneSetName))
+			go engine.controller.sendBatchedPushNotification(eligibleUsers, "pre-alert", call, systemLabel, talkgroupLabel, toneSetName, nil)
+		}
+	}
+}
+
 // TriggerToneAlerts triggers alerts for tone-detected calls
 // Creates one alert per matched tone set (for stacked tones from same or different calls)
 func (engine *AlertEngine) TriggerToneAlerts(call *Call) {
@@ -92,13 +241,18 @@ func (engine *AlertEngine) TriggerToneAlerts(call *Call) {
 		}
 
 		// Parse user's selected tone set IDs (if any)
-		if toneSetIdsRaw != "" && toneSetIdsRaw != "[]" {
+		if toneSetIdsRaw != "" && toneSetIdsRaw != "[]" && toneSetIdsRaw != "null" {
 			var toneSetIds []string
 			if err := json.Unmarshal([]byte(toneSetIdsRaw), &toneSetIds); err == nil {
 				for _, id := range toneSetIds {
 					pref.selectedToneSetIds[id] = true
 				}
+				// DEBUG: Log what user selected
+				engine.controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("tone alert: user %d has selected specific tone sets: %v", userId, toneSetIds))
 			}
+		} else {
+			// DEBUG: Log that user wants all tone sets
+			engine.controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("tone alert: user %d wants ALL tone sets (none selected)", userId))
 		}
 
 		users = append(users, pref)
@@ -119,6 +273,9 @@ func (engine *AlertEngine) TriggerToneAlerts(call *Call) {
 		if matchedToneSet == nil || matchedToneSet.Id == "" {
 			continue
 		}
+
+		// DEBUG: Log detected tone set details
+		engine.controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("🔔 [TONE SET DEBUG] Tone alert processing: Detected tone set ID='%s', Label='%s' on call %d", matchedToneSet.Id, matchedToneSet.Label, call.Id))
 
 		// Check if alert already exists for this call + tone set combination
 		// This prevents duplicate alerts if the function is called multiple times
@@ -149,8 +306,16 @@ func (engine *AlertEngine) TriggerToneAlerts(call *Call) {
 		for _, user := range users {
 			// Check if user wants alerts for this tone set
 			// If user has no specific tone set selection, they want all tone sets
-			if len(user.selectedToneSetIds) > 0 && !user.selectedToneSetIds[matchedToneSet.Id] {
+			if len(user.selectedToneSetIds) == 0 {
+				// User wants all tone sets
+				engine.controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("tone alert: user %d gets alert for '%s' (wants all tone sets)", user.userId, matchedToneSet.Label))
+			} else if !user.selectedToneSetIds[matchedToneSet.Id] {
+				// User did NOT select this tone set - skip
+				engine.controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("tone alert: user %d SKIPPED for '%s' (not in selected tone sets)", user.userId, matchedToneSet.Label))
 				continue // User doesn't want alerts for this specific tone set
+			} else {
+				// User selected this specific tone set
+				engine.controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("tone alert: user %d gets alert for '%s' (selected this tone set)", user.userId, matchedToneSet.Label))
 			}
 
 			// Get user object to check delays
@@ -562,7 +727,7 @@ func (engine *AlertEngine) sendAlertNotification(userId uint64, callId uint64, a
 func (engine *AlertEngine) cleanupOldAlerts() {
 	retentionDays := engine.controller.Options.AlertRetentionDays
 	if retentionDays == 0 {
-		retentionDays = 30 // Default: 30 days
+		retentionDays = 5 // Default: 5 days
 	}
 
 	cutoffTime := time.Now().Add(-time.Duration(retentionDays) * 24 * time.Hour).UnixMilli()

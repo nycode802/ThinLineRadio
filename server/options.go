@@ -83,6 +83,8 @@ type Options struct {
 	StripePriceId               string            `json:"stripePriceId"`
 	BaseUrl                     string            `json:"baseUrl"`
 	TranscriptionConfig         TranscriptionConfig `json:"transcriptionConfig"`
+	TranscriptionFailureThreshold uint            `json:"transcriptionFailureThreshold"`
+	ToneDetectionIssueThreshold uint            `json:"toneDetectionIssueThreshold"`
 	AlertRetentionDays          uint              `json:"alertRetentionDays"`
 	RelayServerURL              string            `json:"relayServerURL"`
 	RelayServerAPIKey           string            `json:"relayServerAPIKey"`
@@ -489,6 +491,28 @@ func (options *Options) FromMap(m map[string]any) *Options {
 		options.AlertRetentionDays = defaults.options.alertRetentionDays
 	}
 
+	switch v := m["transcriptionFailureThreshold"].(type) {
+	case float64:
+		options.TranscriptionFailureThreshold = uint(v)
+	case int:
+		options.TranscriptionFailureThreshold = uint(v)
+	case int64:
+		options.TranscriptionFailureThreshold = uint(v)
+	default:
+		options.TranscriptionFailureThreshold = defaults.options.transcriptionFailureThreshold
+	}
+
+	switch v := m["toneDetectionIssueThreshold"].(type) {
+	case float64:
+		options.ToneDetectionIssueThreshold = uint(v)
+	case int:
+		options.ToneDetectionIssueThreshold = uint(v)
+	case int64:
+		options.ToneDetectionIssueThreshold = uint(v)
+	default:
+		options.ToneDetectionIssueThreshold = defaults.options.toneDetectionIssueThreshold
+	}
+
 	switch v := m["relayServerURL"].(type) {
 	case string:
 		options.RelayServerURL = v
@@ -648,6 +672,8 @@ func (options *Options) Read(db *Database) error {
 	options.SortTalkgroups = defaults.options.sortTalkgroups
 	options.Time12hFormat = defaults.options.time12hFormat
 	options.AlertRetentionDays = defaults.options.alertRetentionDays
+	options.TranscriptionFailureThreshold = defaults.options.transcriptionFailureThreshold
+	options.ToneDetectionIssueThreshold = defaults.options.toneDetectionIssueThreshold
 	options.AdminLocalhostOnly = defaults.options.adminLocalhostOnly
 	options.ConfigSyncEnabled = defaults.options.configSyncEnabled
 	options.ConfigSyncPath = defaults.options.configSyncPath
@@ -1024,6 +1050,20 @@ func (options *Options) Read(db *Database) error {
 					options.AlertRetentionDays = uint(v)
 				}
 			}
+		case "transcriptionFailureThreshold":
+			if err = json.Unmarshal([]byte(value.String), &f); err == nil {
+				switch v := f.(type) {
+				case float64:
+					options.TranscriptionFailureThreshold = uint(v)
+				}
+			}
+		case "toneDetectionIssueThreshold":
+			if err = json.Unmarshal([]byte(value.String), &f); err == nil {
+				switch v := f.(type) {
+				case float64:
+					options.ToneDetectionIssueThreshold = uint(v)
+				}
+			}
 		case "relayServerURL":
 			if err = json.Unmarshal([]byte(value.String), &f); err == nil {
 				switch v := f.(type) {
@@ -1181,6 +1221,8 @@ func (options *Options) Write(db *Database) error {
 	set("stripePriceId", options.StripePriceId)
 	set("baseUrl", options.BaseUrl)
 	set("alertRetentionDays", options.AlertRetentionDays)
+	set("transcriptionFailureThreshold", options.TranscriptionFailureThreshold)
+	set("toneDetectionIssueThreshold", options.ToneDetectionIssueThreshold)
 	set("relayServerURL", options.RelayServerURL)
 	set("relayServerAPIKey", options.RelayServerAPIKey)
 	set("radioReferenceAPIKey", options.RadioReferenceAPIKey)

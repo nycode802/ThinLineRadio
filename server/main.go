@@ -214,6 +214,14 @@ func main() {
 
 	http.HandleFunc("/api/admin/alerts", wrapHandler(controller.Admin.requireLocalhost(controller.Admin.AlertsHandler)).ServeHTTP)
 
+	http.HandleFunc("/api/admin/systemhealth", wrapHandler(controller.Admin.requireLocalhost(controller.Admin.SystemHealthHandler)).ServeHTTP)
+
+	http.HandleFunc("/api/admin/transcription-failures", wrapHandler(controller.Admin.requireLocalhost(controller.Admin.TranscriptionFailuresHandler)).ServeHTTP)
+	http.HandleFunc("/api/admin/transcription-failure-threshold", wrapHandler(controller.Admin.requireLocalhost(controller.Admin.TranscriptionFailureThresholdHandler)).ServeHTTP)
+	http.HandleFunc("/api/admin/tone-detection-issue-threshold", wrapHandler(controller.Admin.requireLocalhost(controller.Admin.ToneDetectionIssueThresholdHandler)).ServeHTTP)
+	http.HandleFunc("/api/admin/alert-retention-days", wrapHandler(controller.Admin.requireLocalhost(controller.Admin.AlertRetentionDaysHandler)).ServeHTTP)
+	http.HandleFunc("/api/admin/call-audio/", wrapHandler(controller.Admin.requireLocalhost(controller.Admin.CallAudioHandler)).ServeHTTP)
+
 	http.HandleFunc("/api/admin/tone-import", wrapHandler(controller.Admin.requireLocalhost(controller.Admin.ToneImportHandler)).ServeHTTP)
 
 	http.HandleFunc("/api/admin/config", wrapHandler(controller.Admin.requireLocalhost(controller.Admin.ConfigHandler)).ServeHTTP)

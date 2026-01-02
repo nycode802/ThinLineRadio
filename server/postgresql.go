@@ -115,6 +115,7 @@ var PostgresqlSchema = []string{
 	`ALTER TABLE "calls" ADD COLUMN IF NOT EXISTS "transcript" text NOT NULL DEFAULT '';`,
 	`ALTER TABLE "calls" ADD COLUMN IF NOT EXISTS "transcriptConfidence" real NOT NULL DEFAULT 0;`,
 	`ALTER TABLE "calls" ADD COLUMN IF NOT EXISTS "transcriptionStatus" text NOT NULL DEFAULT 'pending';`,
+	`ALTER TABLE "calls" ADD COLUMN IF NOT EXISTS "transcriptionFailureReason" text NOT NULL DEFAULT '';`,
 	`CREATE INDEX IF NOT EXISTS "calls_refs_idx" ON "calls" ("systemRef","talkgroupRef","timestamp");`,
 	`CREATE INDEX IF NOT EXISTS "calls_tones_idx" ON "calls" ("hasTones","timestamp");`,
 	`CREATE INDEX IF NOT EXISTS "calls_transcript_idx" ON "calls" ("transcriptionStatus","timestamp");`,

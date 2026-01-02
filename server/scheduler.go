@@ -73,6 +73,11 @@ func (scheduler *Scheduler) run() {
 			scheduler.Controller.AlertEngine.cleanupOldAlerts()
 		}()
 	}
+
+	// Cleanup old system alerts (runs periodically) - runs in background
+	go func() {
+		scheduler.Controller.CleanupOldSystemAlerts()
+	}()
 }
 
 func (scheduler *Scheduler) Start() error {

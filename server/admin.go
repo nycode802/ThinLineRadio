@@ -45,23 +45,23 @@ import (
 // IsLocalhostIP checks if an IP address is localhost
 func IsLocalhostIP(ip string) bool {
 	ip = strings.TrimSpace(ip)
-	
+
 	if ip == "127.0.0.1" || ip == "::1" || ip == "localhost" || ip == "" {
 		return true
 	}
-	
+
 	if strings.HasPrefix(ip, "127.") {
 		return true
 	}
-	
+
 	if strings.HasPrefix(ip, "::ffff:127.") {
 		return true
 	}
-	
+
 	if ip == "[::1]" || ip == "[127.0.0.1]" {
 		return true
 	}
-	
+
 	return false
 }
 
@@ -106,8 +106,7 @@ func (admin *Admin) requireLocalhost(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		clientIP := GetClientIP(r)
 		isLocalhost := IsLocalhostIP(clientIP)
-		
-		
+
 		if admin.Controller.Options.AdminLocalhostOnly {
 			if !isLocalhost {
 				log.Printf("Admin access denied from non-localhost IP: %s for route: %s", clientIP, r.URL.Path)
@@ -161,6 +160,479 @@ func (admin *Admin) AlertsHandler(w http.ResponseWriter, r *http.Request) {
 
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (admin *Admin) SystemHealthHandler(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		t := admin.GetAuthorization(r)
+		if !admin.ValidateToken(t) {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+
+		// Parse query parameters
+		limitStr := r.URL.Query().Get("limit")
+		includeDismissed := r.URL.Query().Get("includeDismissed") == "true"
+
+		limit := 100 // Default limit for admin dashboard
+		if limitStr != "" {
+			if parsedLimit, err := strconv.Atoi(limitStr); err == nil {
+				limit = parsedLimit
+			}
+		}
+
+		// Get system alerts
+		alerts, err := admin.Controller.GetSystemAlerts(limit, includeDismissed)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error": fmt.Sprintf("failed to get system alerts: %v", err),
+			})
+			return
+		}
+
+		// Return JSON response
+		w.Header().Set("Content-Type", "application/json")
+		if b, err := json.Marshal(map[string]interface{}{
+			"alerts": alerts,
+			"count":  len(alerts),
+		}); err == nil {
+			w.Write(b)
+		} else {
+			w.WriteHeader(http.StatusExpectationFailed)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error": "failed to marshal system alerts",
+			})
+		}
+
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (admin *Admin) TranscriptionFailuresHandler(w http.ResponseWriter, r *http.Request) {
+	t := admin.GetAuthorization(r)
+	if !admin.ValidateToken(t) {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		// Get failed transcription calls with details
+		twentyFourHoursAgo := time.Now().Add(-24 * time.Hour).UnixMilli()
+		
+		query := fmt.Sprintf(`SELECT c."callId", c."systemId", c."talkgroupId", c."timestamp", c."transcriptionFailureReason", s."label" as "systemLabel", t."label" as "talkgroupLabel", t."name" as "talkgroupName" FROM "calls" c LEFT JOIN "systems" s ON s."systemId" = c."systemId" LEFT JOIN "talkgroups" t ON t."talkgroupId" = c."talkgroupId" WHERE c."transcriptionStatus" = 'failed' AND c."timestamp" >= %d ORDER BY c."timestamp" DESC LIMIT 100`, twentyFourHoursAgo)
+		
+		rows, err := admin.Controller.Database.Sql.Query(query)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error": fmt.Sprintf("failed to query failed calls: %v", err),
+			})
+			return
+		}
+		defer rows.Close()
+
+		var failedCalls []map[string]interface{}
+		for rows.Next() {
+			var callId, systemId, talkgroupId uint64
+			var timestamp int64
+			var systemLabel, talkgroupLabel, talkgroupName, failureReason sql.NullString
+
+			if err := rows.Scan(&callId, &systemId, &talkgroupId, &timestamp, &failureReason, &systemLabel, &talkgroupLabel, &talkgroupName); err != nil {
+				continue
+			}
+
+			callData := map[string]interface{}{
+				"callId": callId,
+				"systemId": systemId,
+				"talkgroupId": talkgroupId,
+				"timestamp": timestamp,
+				"systemLabel": "",
+				"talkgroupLabel": "",
+				"talkgroupName": "",
+				"failureReason": "",
+			}
+
+			if systemLabel.Valid {
+				callData["systemLabel"] = systemLabel.String
+			}
+			if talkgroupLabel.Valid {
+				callData["talkgroupLabel"] = talkgroupLabel.String
+			}
+			if talkgroupName.Valid {
+				callData["talkgroupName"] = talkgroupName.String
+			}
+			if failureReason.Valid {
+				callData["failureReason"] = failureReason.String
+			}
+
+			failedCalls = append(failedCalls, callData)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"calls": failedCalls,
+			"count": len(failedCalls),
+		})
+
+	case http.MethodPost:
+		// Reset transcription failures - clear failed status
+		var request struct {
+			CallIds []uint64 `json:"callIds"` // If empty, reset all
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error": "invalid request body",
+			})
+			return
+		}
+
+		var query string
+		var rowsAffected int64
+		var err error
+		
+		if len(request.CallIds) > 0 {
+			// Reset specific calls
+			callIdStrs := make([]string, len(request.CallIds))
+			for i, id := range request.CallIds {
+				callIdStrs[i] = fmt.Sprintf("%d", id)
+			}
+			query = fmt.Sprintf(`UPDATE "calls" SET "transcriptionStatus" = 'pending', "transcriptionFailureReason" = '' WHERE "callId" IN (%s)`, strings.Join(callIdStrs, ","))
+		} else {
+			// Reset all failed calls from last 24 hours
+			twentyFourHoursAgo := time.Now().Add(-24 * time.Hour).UnixMilli()
+			query = fmt.Sprintf(`UPDATE "calls" SET "transcriptionStatus" = 'pending', "transcriptionFailureReason" = '' WHERE "transcriptionStatus" = 'failed' AND "timestamp" >= %d`, twentyFourHoursAgo)
+		}
+
+		// Log the query for debugging
+		admin.Controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("Resetting transcription failures with query: %s", query))
+
+		var result sql.Result
+		result, err = admin.Controller.Database.Sql.Exec(query)
+		if err != nil {
+			errorMsg := fmt.Sprintf("failed to reset transcription failures: %v (query: %s)", err, query)
+			admin.Controller.Logs.LogEvent(LogLevelError, errorMsg)
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error": errorMsg,
+			})
+			return
+		}
+
+		rowsAffected, err = result.RowsAffected()
+		if err != nil {
+			admin.Controller.Logs.LogEvent(LogLevelWarn, fmt.Sprintf("failed to get rows affected: %v", err))
+		}
+
+		admin.Controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("Successfully reset transcription failures: %d rows affected", rowsAffected))
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":      true,
+			"rowsAffected": rowsAffected,
+		})
+
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (admin *Admin) AlertRetentionDaysHandler(w http.ResponseWriter, r *http.Request) {
+	t := admin.GetAuthorization(r)
+	if !admin.ValidateToken(t) {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		// Get current retention days
+		retentionDays := admin.Controller.Options.AlertRetentionDays
+		if retentionDays == 0 {
+			retentionDays = 5 // Default
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"retentionDays": retentionDays,
+		})
+
+	case http.MethodPost:
+		// Set retention days
+		var request struct {
+			RetentionDays uint `json:"retentionDays"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error": "invalid request body",
+			})
+			return
+		}
+
+		if request.RetentionDays == 0 {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error": "retention days must be greater than 0",
+			})
+			return
+		}
+
+		admin.Controller.Options.AlertRetentionDays = request.RetentionDays
+
+		if err := admin.Controller.Options.Write(admin.Controller.Database); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error": fmt.Sprintf("failed to save retention days: %v", err),
+			})
+			return
+		}
+
+		// Reload options to ensure consistency
+		if err := admin.Controller.Options.Read(admin.Controller.Database); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error": fmt.Sprintf("failed to reload options: %v", err),
+			})
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":       true,
+			"retentionDays": request.RetentionDays,
+		})
+
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (admin *Admin) ToneDetectionIssueThresholdHandler(w http.ResponseWriter, r *http.Request) {
+	t := admin.GetAuthorization(r)
+	if !admin.ValidateToken(t) {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		// Get current threshold
+		threshold := admin.Controller.Options.ToneDetectionIssueThreshold
+		if threshold == 0 {
+			threshold = 5 // Default
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"threshold": threshold,
+		})
+
+	case http.MethodPost:
+		// Set threshold
+		var request struct {
+			Threshold uint `json:"threshold"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error": "invalid request body",
+			})
+			return
+		}
+
+		if request.Threshold == 0 {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error": "threshold must be greater than 0",
+			})
+			return
+		}
+
+		admin.Controller.Options.ToneDetectionIssueThreshold = request.Threshold
+
+		if err := admin.Controller.Options.Write(admin.Controller.Database); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error": fmt.Sprintf("failed to save threshold: %v", err),
+			})
+			return
+		}
+
+		// Reload options to ensure consistency
+		if err := admin.Controller.Options.Read(admin.Controller.Database); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error": fmt.Sprintf("failed to reload options: %v", err),
+			})
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":   true,
+			"threshold": request.Threshold,
+		})
+
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (admin *Admin) TranscriptionFailureThresholdHandler(w http.ResponseWriter, r *http.Request) {
+	t := admin.GetAuthorization(r)
+	if !admin.ValidateToken(t) {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		// Get current threshold
+		threshold := admin.Controller.Options.TranscriptionFailureThreshold
+		if threshold == 0 {
+			threshold = 10 // Default
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"threshold": threshold,
+		})
+
+	case http.MethodPost:
+		// Set threshold
+		var request struct {
+			Threshold uint `json:"threshold"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error": "invalid request body",
+			})
+			return
+		}
+
+		if request.Threshold == 0 {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error": "threshold must be greater than 0",
+			})
+			return
+		}
+
+		admin.Controller.Options.TranscriptionFailureThreshold = request.Threshold
+
+		if err := admin.Controller.Options.Write(admin.Controller.Database); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error": fmt.Sprintf("failed to save threshold: %v", err),
+			})
+			return
+		}
+
+		// Reload options to ensure consistency
+		if err := admin.Controller.Options.Read(admin.Controller.Database); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error": fmt.Sprintf("failed to reload options: %v", err),
+			})
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"threshold": request.Threshold,
+		})
+
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+// CallAudioHandler serves call audio for admin playback
+func (admin *Admin) CallAudioHandler(w http.ResponseWriter, r *http.Request) {
+	t := admin.GetAuthorization(r)
+	if !admin.ValidateToken(t) {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Extract call ID from URL path (e.g., /api/admin/call-audio/12345)
+	pathParts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if len(pathParts) < 4 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "invalid call ID"})
+		return
+	}
+
+	callIdStr := pathParts[3]
+	callId, err := strconv.ParseUint(callIdStr, 10, 64)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "invalid call ID format"})
+		return
+	}
+
+	// Get call from database
+	call, err := admin.Controller.Calls.GetCall(callId)
+	if err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"error": fmt.Sprintf("call not found: %v", err)})
+		return
+	}
+
+	// Check if call has audio
+	if len(call.Audio) == 0 {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"error": "call has no audio"})
+		return
+	}
+
+	// Set appropriate headers for audio playback
+	mimeType := call.AudioMime
+	if mimeType == "" {
+		mimeType = "audio/wav" // Default to WAV if not specified
+	}
+
+	w.Header().Set("Content-Type", mimeType)
+	w.Header().Set("Content-Length", strconv.Itoa(len(call.Audio)))
+	w.Header().Set("Cache-Control", "private, max-age=3600")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=\"call-%d.%s\"", callId, getAudioExtension(mimeType)))
+
+	// Write audio data
+	w.Write(call.Audio)
+}
+
+// getAudioExtension returns file extension based on MIME type
+func getAudioExtension(mimeType string) string {
+	switch mimeType {
+	case "audio/mpeg", "audio/mp3":
+		return "mp3"
+	case "audio/wav", "audio/x-wav":
+		return "wav"
+	case "audio/ogg":
+		return "ogg"
+	case "audio/aac":
+		return "aac"
+	case "audio/m4a", "audio/mp4":
+		return "m4a"
+	default:
+		return "wav"
 	}
 }
 
@@ -301,10 +773,10 @@ func (admin *Admin) ConfigHandler(w http.ResponseWriter, r *http.Request) {
 			// For each entity type present in the import file, ALL existing data of that type
 			// in the database is replaced with the imported data. Entities not in the import
 			// file are left unchanged (except for users and userGroups which are fully replaced).
-			
+
 			// Check if this is a full import (destructive) or just a save (non-destructive)
 			isFullImport := r.Header.Get("X-Full-Import") == "true"
-			
+
 			m := map[string]any{}
 			err := json.NewDecoder(r.Body).Decode(&m)
 			if err != nil {
@@ -316,7 +788,6 @@ func (admin *Admin) ConfigHandler(w http.ResponseWriter, r *http.Request) {
 			defer admin.mutex.Unlock()
 
 			admin.Controller.Dirwatches.Stop()
-
 
 			switch v := m["apikeys"].(type) {
 			case []any:
@@ -480,295 +951,295 @@ func (admin *Admin) ConfigHandler(w http.ResponseWriter, r *http.Request) {
 			groupIdMap := make(map[uint64]uint64)
 			switch v := m["userGroups"].(type) {
 			case []any:
-			// Track imported group IDs to determine which groups to delete
-			// Track actual IDs of successfully imported groups (updated or created)
-			importedGroupIds := make(map[uint64]bool)
-			
-			for _, groupData := range v {
-				groupMap, ok := groupData.(map[string]any)
-				if !ok {
-					continue
-				}
+				// Track imported group IDs to determine which groups to delete
+				// Track actual IDs of successfully imported groups (updated or created)
+				importedGroupIds := make(map[uint64]bool)
 
-				// Extract group data
-				id, _ := groupMap["id"].(float64)
-				name, _ := groupMap["name"].(string)
-				if name == "" {
-					continue
-				}
-
-				importedGroupId := uint64(id)
-
-				// Check if group exists by ID first, then by name
-				existingGroup := admin.Controller.UserGroups.Get(importedGroupId)
-				if existingGroup == nil {
-					// If not found by ID, try to find by name
-					existingGroup = admin.Controller.UserGroups.GetByName(name)
-				}
-				if existingGroup != nil {
-					// Fully overwrite existing group with imported data
-					existingGroup.Name = name
-					existingGroup.Description = getStringFromMap(groupMap, "description")
-					existingGroup.SystemAccess = getStringFromMap(groupMap, "systemAccess")
-					existingGroup.Delay = int(getFloat64FromMap(groupMap, "delay"))
-					existingGroup.SystemDelays = getStringFromMap(groupMap, "systemDelays")
-					existingGroup.TalkgroupDelays = getStringFromMap(groupMap, "talkgroupDelays")
-					existingGroup.ConnectionLimit = uint(getFloat64FromMap(groupMap, "connectionLimit"))
-					existingGroup.MaxUsers = uint(getFloat64FromMap(groupMap, "maxUsers"))
-					existingGroup.BillingEnabled = getBoolFromMap(groupMap, "billingEnabled", false)
-					existingGroup.StripePriceId = getStringFromMap(groupMap, "stripePriceId")
-					existingGroup.PricingOptions = getStringFromMap(groupMap, "pricingOptions")
-					existingGroup.BillingMode = getStringFromMap(groupMap, "billingMode")
-					existingGroup.CollectSalesTax = getBoolFromMap(groupMap, "collectSalesTax", false)
-					existingGroup.IsPublicRegistration = getBoolFromMap(groupMap, "isPublicRegistration", false)
-					existingGroup.AllowAddExistingUsers = getBoolFromMap(groupMap, "allowAddExistingUsers", false)
-					if createdAt, ok := groupMap["createdAt"].(float64); ok {
-						existingGroup.CreatedAt = int64(createdAt)
-					}
-
-					if err := admin.Controller.UserGroups.Update(existingGroup, admin.Controller.Database); err != nil {
-						logError(fmt.Errorf("failed to update imported user group %s: %v", name, err))
-					} else {
-						// Track the actual ID of the successfully updated group
-						importedGroupIds[existingGroup.Id] = true
-						// Map imported ID to actual ID (may be the same)
-						groupIdMap[importedGroupId] = existingGroup.Id
-					}
-				} else {
-					// Create new group
-					group := &UserGroup{
-						Name:                name,
-						Description:         getStringFromMap(groupMap, "description"),
-						SystemAccess:        getStringFromMap(groupMap, "systemAccess"),
-						Delay:               int(getFloat64FromMap(groupMap, "delay")),
-						SystemDelays:         getStringFromMap(groupMap, "systemDelays"),
-						TalkgroupDelays:     getStringFromMap(groupMap, "talkgroupDelays"),
-						ConnectionLimit:      uint(getFloat64FromMap(groupMap, "connectionLimit")),
-						MaxUsers:            uint(getFloat64FromMap(groupMap, "maxUsers")),
-						BillingEnabled:      getBoolFromMap(groupMap, "billingEnabled", false),
-						StripePriceId:       getStringFromMap(groupMap, "stripePriceId"),
-						PricingOptions:      getStringFromMap(groupMap, "pricingOptions"),
-						BillingMode:         getStringFromMap(groupMap, "billingMode"),
-						CollectSalesTax:     getBoolFromMap(groupMap, "collectSalesTax", false),
-						IsPublicRegistration: getBoolFromMap(groupMap, "isPublicRegistration", false),
-						AllowAddExistingUsers: getBoolFromMap(groupMap, "allowAddExistingUsers", false),
-					}
-					if createdAt, ok := groupMap["createdAt"].(float64); ok {
-						group.CreatedAt = int64(createdAt)
-					} else {
-						group.CreatedAt = time.Now().Unix()
-					}
-
-					if err := admin.Controller.UserGroups.Add(group, admin.Controller.Database); err != nil {
-						logError(fmt.Errorf("failed to import user group %s: %v", name, err))
-					} else {
-						// Track the actual ID of the successfully created group (may differ from imported ID)
-						importedGroupIds[group.Id] = true
-						// Map imported ID to actual ID (will be different for new groups)
-						groupIdMap[importedGroupId] = group.Id
-					}
-				}
-			}
-			
-			// Only delete groups not in import if this is a full import
-			// For regular saves, we preserve groups that aren't in the form data
-			if isFullImport {
-				allGroups := admin.Controller.UserGroups.GetAll()
-				for _, existingGroup := range allGroups {
-					if !importedGroupIds[existingGroup.Id] {
-						if err := admin.Controller.UserGroups.Delete(existingGroup.Id, admin.Controller.Database); err != nil {
-							logError(fmt.Errorf("failed to remove user group %d during import: %v", existingGroup.Id, err))
-						}
-					}
-				}
-			}
-			
-			// Reload user groups after import
-			if err := admin.Controller.UserGroups.Load(admin.Controller.Database); err != nil {
-				logError(err)
-			}
-			
-			// Rebuild groupIdMap after reload by matching imported names to actual groups
-			// This ensures the mapping is correct even if IDs don't match
-			if v, ok := m["userGroups"].([]any); ok {
 				for _, groupData := range v {
 					groupMap, ok := groupData.(map[string]any)
 					if !ok {
 						continue
 					}
-					
-					importedId, _ := groupMap["id"].(float64)
-					importedName, _ := groupMap["name"].(string)
-					if importedName == "" {
+
+					// Extract group data
+					id, _ := groupMap["id"].(float64)
+					name, _ := groupMap["name"].(string)
+					if name == "" {
 						continue
 					}
-					
-					importedGroupId := uint64(importedId)
-					// Find the actual group by name (since IDs might not match)
-					if actualGroup := admin.Controller.UserGroups.GetByName(importedName); actualGroup != nil {
-						// Update the mapping with the actual ID
-						groupIdMap[importedGroupId] = actualGroup.Id
+
+					importedGroupId := uint64(id)
+
+					// Check if group exists by ID first, then by name
+					existingGroup := admin.Controller.UserGroups.Get(importedGroupId)
+					if existingGroup == nil {
+						// If not found by ID, try to find by name
+						existingGroup = admin.Controller.UserGroups.GetByName(name)
+					}
+					if existingGroup != nil {
+						// Fully overwrite existing group with imported data
+						existingGroup.Name = name
+						existingGroup.Description = getStringFromMap(groupMap, "description")
+						existingGroup.SystemAccess = getStringFromMap(groupMap, "systemAccess")
+						existingGroup.Delay = int(getFloat64FromMap(groupMap, "delay"))
+						existingGroup.SystemDelays = getStringFromMap(groupMap, "systemDelays")
+						existingGroup.TalkgroupDelays = getStringFromMap(groupMap, "talkgroupDelays")
+						existingGroup.ConnectionLimit = uint(getFloat64FromMap(groupMap, "connectionLimit"))
+						existingGroup.MaxUsers = uint(getFloat64FromMap(groupMap, "maxUsers"))
+						existingGroup.BillingEnabled = getBoolFromMap(groupMap, "billingEnabled", false)
+						existingGroup.StripePriceId = getStringFromMap(groupMap, "stripePriceId")
+						existingGroup.PricingOptions = getStringFromMap(groupMap, "pricingOptions")
+						existingGroup.BillingMode = getStringFromMap(groupMap, "billingMode")
+						existingGroup.CollectSalesTax = getBoolFromMap(groupMap, "collectSalesTax", false)
+						existingGroup.IsPublicRegistration = getBoolFromMap(groupMap, "isPublicRegistration", false)
+						existingGroup.AllowAddExistingUsers = getBoolFromMap(groupMap, "allowAddExistingUsers", false)
+						if createdAt, ok := groupMap["createdAt"].(float64); ok {
+							existingGroup.CreatedAt = int64(createdAt)
+						}
+
+						if err := admin.Controller.UserGroups.Update(existingGroup, admin.Controller.Database); err != nil {
+							logError(fmt.Errorf("failed to update imported user group %s: %v", name, err))
+						} else {
+							// Track the actual ID of the successfully updated group
+							importedGroupIds[existingGroup.Id] = true
+							// Map imported ID to actual ID (may be the same)
+							groupIdMap[importedGroupId] = existingGroup.Id
+						}
+					} else {
+						// Create new group
+						group := &UserGroup{
+							Name:                  name,
+							Description:           getStringFromMap(groupMap, "description"),
+							SystemAccess:          getStringFromMap(groupMap, "systemAccess"),
+							Delay:                 int(getFloat64FromMap(groupMap, "delay")),
+							SystemDelays:          getStringFromMap(groupMap, "systemDelays"),
+							TalkgroupDelays:       getStringFromMap(groupMap, "talkgroupDelays"),
+							ConnectionLimit:       uint(getFloat64FromMap(groupMap, "connectionLimit")),
+							MaxUsers:              uint(getFloat64FromMap(groupMap, "maxUsers")),
+							BillingEnabled:        getBoolFromMap(groupMap, "billingEnabled", false),
+							StripePriceId:         getStringFromMap(groupMap, "stripePriceId"),
+							PricingOptions:        getStringFromMap(groupMap, "pricingOptions"),
+							BillingMode:           getStringFromMap(groupMap, "billingMode"),
+							CollectSalesTax:       getBoolFromMap(groupMap, "collectSalesTax", false),
+							IsPublicRegistration:  getBoolFromMap(groupMap, "isPublicRegistration", false),
+							AllowAddExistingUsers: getBoolFromMap(groupMap, "allowAddExistingUsers", false),
+						}
+						if createdAt, ok := groupMap["createdAt"].(float64); ok {
+							group.CreatedAt = int64(createdAt)
+						} else {
+							group.CreatedAt = time.Now().Unix()
+						}
+
+						if err := admin.Controller.UserGroups.Add(group, admin.Controller.Database); err != nil {
+							logError(fmt.Errorf("failed to import user group %s: %v", name, err))
+						} else {
+							// Track the actual ID of the successfully created group (may differ from imported ID)
+							importedGroupIds[group.Id] = true
+							// Map imported ID to actual ID (will be different for new groups)
+							groupIdMap[importedGroupId] = group.Id
+						}
 					}
 				}
-			}
+
+				// Only delete groups not in import if this is a full import
+				// For regular saves, we preserve groups that aren't in the form data
+				if isFullImport {
+					allGroups := admin.Controller.UserGroups.GetAll()
+					for _, existingGroup := range allGroups {
+						if !importedGroupIds[existingGroup.Id] {
+							if err := admin.Controller.UserGroups.Delete(existingGroup.Id, admin.Controller.Database); err != nil {
+								logError(fmt.Errorf("failed to remove user group %d during import: %v", existingGroup.Id, err))
+							}
+						}
+					}
+				}
+
+				// Reload user groups after import
+				if err := admin.Controller.UserGroups.Load(admin.Controller.Database); err != nil {
+					logError(err)
+				}
+
+				// Rebuild groupIdMap after reload by matching imported names to actual groups
+				// This ensures the mapping is correct even if IDs don't match
+				if v, ok := m["userGroups"].([]any); ok {
+					for _, groupData := range v {
+						groupMap, ok := groupData.(map[string]any)
+						if !ok {
+							continue
+						}
+
+						importedId, _ := groupMap["id"].(float64)
+						importedName, _ := groupMap["name"].(string)
+						if importedName == "" {
+							continue
+						}
+
+						importedGroupId := uint64(importedId)
+						// Find the actual group by name (since IDs might not match)
+						if actualGroup := admin.Controller.UserGroups.GetByName(importedName); actualGroup != nil {
+							// Update the mapping with the actual ID
+							groupIdMap[importedGroupId] = actualGroup.Id
+						}
+					}
+				}
 			}
 
 			// Handle users import
 			switch v := m["users"].(type) {
 			case []any:
-			// Only delete ALL existing users for full imports, not regular saves
-			if isFullImport {
-				allUsers := admin.Controller.Users.GetAllUsers()
-				for _, existingUser := range allUsers {
-					// Delete from database first
-					_, err := admin.Controller.Database.Sql.Exec(`DELETE FROM "users" WHERE "userId" = $1`, existingUser.Id)
-					if err != nil {
-						logError(fmt.Errorf("failed to delete user %s from database during import: %v", existingUser.Email, err))
-					} else {
-						// Remove from in-memory map
-						if err := admin.Controller.Users.Remove(existingUser.Id); err != nil {
-							logError(fmt.Errorf("failed to remove user %s from memory during import: %v", existingUser.Email, err))
-						}
-					}
-				}
-			}
-			
-			// Now create/update users from import
-			for _, userData := range v {
-				userMap, ok := userData.(map[string]any)
-				if !ok {
-					continue
-				}
-
-				email, _ := userMap["email"].(string)
-				if email == "" {
-					continue
-				}
-
-				// Create new user with imported password hash
-				password, _ := userMap["password"].(string)
-				if password == "" {
-					logError(fmt.Errorf("cannot import user %s without password hash", email))
-					continue
-				}
-
-				// Map imported userGroupId to actual group ID
-				importedUserGroupId := getUint64FromMap(userMap, "userGroupId")
-				actualUserGroupId := uint64(0)
-				if importedUserGroupId > 0 {
-					if actualId, ok := groupIdMap[importedUserGroupId]; ok {
-						actualUserGroupId = actualId
-					} else {
-						// Group ID not found in mapping - try to find by ID in database
-						if existingGroup := admin.Controller.UserGroups.Get(importedUserGroupId); existingGroup != nil {
-							actualUserGroupId = importedUserGroupId
+				// Only delete ALL existing users for full imports, not regular saves
+				if isFullImport {
+					allUsers := admin.Controller.Users.GetAllUsers()
+					for _, existingUser := range allUsers {
+						// Delete from database first
+						_, err := admin.Controller.Database.Sql.Exec(`DELETE FROM "users" WHERE "userId" = $1`, existingUser.Id)
+						if err != nil {
+							logError(fmt.Errorf("failed to delete user %s from database during import: %v", existingUser.Email, err))
 						} else {
-							// Group doesn't exist - set to 0
-							actualUserGroupId = 0
-							logError(fmt.Errorf("user %s references non-existent group ID %d, setting to 0", email, importedUserGroupId))
+							// Remove from in-memory map
+							if err := admin.Controller.Users.Remove(existingUser.Id); err != nil {
+								logError(fmt.Errorf("failed to remove user %s from memory during import: %v", existingUser.Email, err))
+							}
 						}
 					}
 				}
 
-				// Check if user already exists
-				existingUser := admin.Controller.Users.GetUserByEmail(email)
-				
-				if existingUser != nil {
-					// Update existing user with imported data
-					existingUser.Password = password // Use imported password hash directly
-					existingUser.FirstName = getStringFromMap(userMap, "firstName")
-					existingUser.LastName = getStringFromMap(userMap, "lastName")
-					existingUser.ZipCode = getStringFromMap(userMap, "zipCode")
-					existingUser.Verified = getBoolFromMap(userMap, "verified", false)
-					existingUser.UserGroupId = actualUserGroupId
-					existingUser.IsGroupAdmin = getBoolFromMap(userMap, "isGroupAdmin", false)
-					existingUser.SystemAdmin = getBoolFromMap(userMap, "systemAdmin", false)
-					existingUser.PinExpiresAt = getUint64FromMap(userMap, "pinExpiresAt")
-					existingUser.ConnectionLimit = uint(getFloat64FromMap(userMap, "connectionLimit"))
-					existingUser.Systems = getStringFromMap(userMap, "systems")
-					existingUser.Delay = int(getFloat64FromMap(userMap, "delay"))
-					existingUser.SystemDelays = getStringFromMap(userMap, "systemDelays")
-					existingUser.TalkgroupDelays = getStringFromMap(userMap, "talkgroupDelays")
-					existingUser.Settings = getStringFromMap(userMap, "settings")
-					existingUser.StripeCustomerId = getStringFromMap(userMap, "stripeCustomerId")
-					existingUser.StripeSubscriptionId = getStringFromMap(userMap, "stripeSubscriptionId")
-					existingUser.SubscriptionStatus = getStringFromMap(userMap, "subscriptionStatus")
-					existingUser.AccountExpiresAt = getUint64FromMap(userMap, "accountExpiresAt")
-					
-					// Update PIN if provided in import (don't regenerate if already exists)
-					if importedPin := getStringFromMap(userMap, "pin"); importedPin != "" {
-						existingUser.Pin = importedPin
-					}
-					
-					// Update timestamps if provided
-					if createdAt := getStringFromMap(userMap, "createdAt"); createdAt != "" {
-						existingUser.CreatedAt = createdAt
-					}
-					if lastLogin := getStringFromMap(userMap, "lastLogin"); lastLogin != "" {
-						existingUser.LastLogin = lastLogin
-					}
-					
-					// Update user in database
-					if err := admin.Controller.Users.Update(existingUser); err != nil {
-						logError(fmt.Errorf("failed to update existing user %s: %v", email, err))
+				// Now create/update users from import
+				for _, userData := range v {
+					userMap, ok := userData.(map[string]any)
+					if !ok {
 						continue
 					}
-					if err := admin.Controller.Users.Write(admin.Controller.Database); err != nil {
-						logError(fmt.Errorf("failed to write updated user %s to database: %v", email, err))
-					}
-				} else {
-					// Create new user
-					user := &User{
-						Email:       email,
-						Password:    password, // Use imported password hash directly
-						FirstName:   getStringFromMap(userMap, "firstName"),
-						LastName:    getStringFromMap(userMap, "lastName"),
-						ZipCode:     getStringFromMap(userMap, "zipCode"),
-						Verified:    getBoolFromMap(userMap, "verified", false),
-						UserGroupId: actualUserGroupId,
-						IsGroupAdmin: getBoolFromMap(userMap, "isGroupAdmin", false),
-						SystemAdmin: getBoolFromMap(userMap, "systemAdmin", false),
-						Pin:         getStringFromMap(userMap, "pin"),
-						PinExpiresAt: getUint64FromMap(userMap, "pinExpiresAt"),
-						ConnectionLimit: uint(getFloat64FromMap(userMap, "connectionLimit")),
-						Systems:      getStringFromMap(userMap, "systems"),
-						Delay:        int(getFloat64FromMap(userMap, "delay")),
-						SystemDelays: getStringFromMap(userMap, "systemDelays"),
-						TalkgroupDelays: getStringFromMap(userMap, "talkgroupDelays"),
-						Settings:     getStringFromMap(userMap, "settings"),
-						StripeCustomerId: getStringFromMap(userMap, "stripeCustomerId"),
-						StripeSubscriptionId: getStringFromMap(userMap, "stripeSubscriptionId"),
-						SubscriptionStatus: getStringFromMap(userMap, "subscriptionStatus"),
-						AccountExpiresAt: getUint64FromMap(userMap, "accountExpiresAt"),
-						CreatedAt:   getStringFromMap(userMap, "createdAt"),
-						LastLogin:   getStringFromMap(userMap, "lastLogin"),
+
+					email, _ := userMap["email"].(string)
+					if email == "" {
+						continue
 					}
 
-					// Generate PIN if not provided
-					if user.Pin == "" {
-						pin, err := admin.Controller.Users.GenerateUniquePin(0)
-						if err != nil {
-							logError(fmt.Errorf("failed to generate PIN for imported user %s: %v", email, err))
+					// Create new user with imported password hash
+					password, _ := userMap["password"].(string)
+					if password == "" {
+						logError(fmt.Errorf("cannot import user %s without password hash", email))
+						continue
+					}
+
+					// Map imported userGroupId to actual group ID
+					importedUserGroupId := getUint64FromMap(userMap, "userGroupId")
+					actualUserGroupId := uint64(0)
+					if importedUserGroupId > 0 {
+						if actualId, ok := groupIdMap[importedUserGroupId]; ok {
+							actualUserGroupId = actualId
+						} else {
+							// Group ID not found in mapping - try to find by ID in database
+							if existingGroup := admin.Controller.UserGroups.Get(importedUserGroupId); existingGroup != nil {
+								actualUserGroupId = importedUserGroupId
+							} else {
+								// Group doesn't exist - set to 0
+								actualUserGroupId = 0
+								logError(fmt.Errorf("user %s references non-existent group ID %d, setting to 0", email, importedUserGroupId))
+							}
+						}
+					}
+
+					// Check if user already exists
+					existingUser := admin.Controller.Users.GetUserByEmail(email)
+
+					if existingUser != nil {
+						// Update existing user with imported data
+						existingUser.Password = password // Use imported password hash directly
+						existingUser.FirstName = getStringFromMap(userMap, "firstName")
+						existingUser.LastName = getStringFromMap(userMap, "lastName")
+						existingUser.ZipCode = getStringFromMap(userMap, "zipCode")
+						existingUser.Verified = getBoolFromMap(userMap, "verified", false)
+						existingUser.UserGroupId = actualUserGroupId
+						existingUser.IsGroupAdmin = getBoolFromMap(userMap, "isGroupAdmin", false)
+						existingUser.SystemAdmin = getBoolFromMap(userMap, "systemAdmin", false)
+						existingUser.PinExpiresAt = getUint64FromMap(userMap, "pinExpiresAt")
+						existingUser.ConnectionLimit = uint(getFloat64FromMap(userMap, "connectionLimit"))
+						existingUser.Systems = getStringFromMap(userMap, "systems")
+						existingUser.Delay = int(getFloat64FromMap(userMap, "delay"))
+						existingUser.SystemDelays = getStringFromMap(userMap, "systemDelays")
+						existingUser.TalkgroupDelays = getStringFromMap(userMap, "talkgroupDelays")
+						existingUser.Settings = getStringFromMap(userMap, "settings")
+						existingUser.StripeCustomerId = getStringFromMap(userMap, "stripeCustomerId")
+						existingUser.StripeSubscriptionId = getStringFromMap(userMap, "stripeSubscriptionId")
+						existingUser.SubscriptionStatus = getStringFromMap(userMap, "subscriptionStatus")
+						existingUser.AccountExpiresAt = getUint64FromMap(userMap, "accountExpiresAt")
+
+						// Update PIN if provided in import (don't regenerate if already exists)
+						if importedPin := getStringFromMap(userMap, "pin"); importedPin != "" {
+							existingUser.Pin = importedPin
+						}
+
+						// Update timestamps if provided
+						if createdAt := getStringFromMap(userMap, "createdAt"); createdAt != "" {
+							existingUser.CreatedAt = createdAt
+						}
+						if lastLogin := getStringFromMap(userMap, "lastLogin"); lastLogin != "" {
+							existingUser.LastLogin = lastLogin
+						}
+
+						// Update user in database
+						if err := admin.Controller.Users.Update(existingUser); err != nil {
+							logError(fmt.Errorf("failed to update existing user %s: %v", email, err))
 							continue
 						}
-						user.Pin = pin
-					}
+						if err := admin.Controller.Users.Write(admin.Controller.Database); err != nil {
+							logError(fmt.Errorf("failed to write updated user %s to database: %v", email, err))
+						}
+					} else {
+						// Create new user
+						user := &User{
+							Email:                email,
+							Password:             password, // Use imported password hash directly
+							FirstName:            getStringFromMap(userMap, "firstName"),
+							LastName:             getStringFromMap(userMap, "lastName"),
+							ZipCode:              getStringFromMap(userMap, "zipCode"),
+							Verified:             getBoolFromMap(userMap, "verified", false),
+							UserGroupId:          actualUserGroupId,
+							IsGroupAdmin:         getBoolFromMap(userMap, "isGroupAdmin", false),
+							SystemAdmin:          getBoolFromMap(userMap, "systemAdmin", false),
+							Pin:                  getStringFromMap(userMap, "pin"),
+							PinExpiresAt:         getUint64FromMap(userMap, "pinExpiresAt"),
+							ConnectionLimit:      uint(getFloat64FromMap(userMap, "connectionLimit")),
+							Systems:              getStringFromMap(userMap, "systems"),
+							Delay:                int(getFloat64FromMap(userMap, "delay")),
+							SystemDelays:         getStringFromMap(userMap, "systemDelays"),
+							TalkgroupDelays:      getStringFromMap(userMap, "talkgroupDelays"),
+							Settings:             getStringFromMap(userMap, "settings"),
+							StripeCustomerId:     getStringFromMap(userMap, "stripeCustomerId"),
+							StripeSubscriptionId: getStringFromMap(userMap, "stripeSubscriptionId"),
+							SubscriptionStatus:   getStringFromMap(userMap, "subscriptionStatus"),
+							AccountExpiresAt:     getUint64FromMap(userMap, "accountExpiresAt"),
+							CreatedAt:            getStringFromMap(userMap, "createdAt"),
+							LastLogin:            getStringFromMap(userMap, "lastLogin"),
+						}
 
-					// Set createdAt if not provided
-					if user.CreatedAt == "" {
-						user.CreatedAt = fmt.Sprintf("%d", time.Now().Unix())
-					}
+						// Generate PIN if not provided
+						if user.Pin == "" {
+							pin, err := admin.Controller.Users.GenerateUniquePin(0)
+							if err != nil {
+								logError(fmt.Errorf("failed to generate PIN for imported user %s: %v", email, err))
+								continue
+							}
+							user.Pin = pin
+						}
 
-					if err := admin.Controller.Users.SaveNewUser(user, admin.Controller.Database); err != nil {
-						logError(fmt.Errorf("failed to import new user %s: %v", email, err))
+						// Set createdAt if not provided
+						if user.CreatedAt == "" {
+							user.CreatedAt = fmt.Sprintf("%d", time.Now().Unix())
+						}
+
+						if err := admin.Controller.Users.SaveNewUser(user, admin.Controller.Database); err != nil {
+							logError(fmt.Errorf("failed to import new user %s: %v", email, err))
+						}
 					}
 				}
-			}
-			
-			// Reload users after import
-			if err := admin.Controller.Users.Read(admin.Controller.Database); err != nil {
-				logError(err)
-			}
+
+				// Reload users after import
+				if err := admin.Controller.Users.Read(admin.Controller.Database); err != nil {
+					logError(err)
+				}
 			}
 
 			// Handle keyword lists import
@@ -799,31 +1270,31 @@ func (admin *Admin) ConfigHandler(w http.ResponseWriter, r *http.Request) {
 						createdAt = time.Now().UnixMilli()
 					}
 
-				// Get keywords array
-				var keywords []string
-				if keywordsData, ok := listMap["keywords"].([]any); ok {
-					for _, kw := range keywordsData {
-						if k, ok := kw.(string); ok {
-							keywords = append(keywords, k)
+					// Get keywords array
+					var keywords []string
+					if keywordsData, ok := listMap["keywords"].([]any); ok {
+						for _, kw := range keywordsData {
+							if k, ok := kw.(string); ok {
+								keywords = append(keywords, k)
+							}
 						}
 					}
-				}
 
-				keywordsJson, _ := json.Marshal(keywords)
+					keywordsJson, _ := json.Marshal(keywords)
 
-				// Insert keyword list using parameterized queries
-				if admin.Controller.Database.Config.DbType == DbTypePostgresql {
-					query := `INSERT INTO "keywordLists" ("label", "description", "keywords", "order", "createdAt") VALUES ($1, $2, $3, $4, $5) RETURNING "keywordListId"`
-					var listId uint64
-					if err := admin.Controller.Database.Sql.QueryRow(query, label, description, string(keywordsJson), order, createdAt).Scan(&listId); err != nil {
-						logError(fmt.Errorf("failed to import keyword list %s: %v", label, err))
+					// Insert keyword list using parameterized queries
+					if admin.Controller.Database.Config.DbType == DbTypePostgresql {
+						query := `INSERT INTO "keywordLists" ("label", "description", "keywords", "order", "createdAt") VALUES ($1, $2, $3, $4, $5) RETURNING "keywordListId"`
+						var listId uint64
+						if err := admin.Controller.Database.Sql.QueryRow(query, label, description, string(keywordsJson), order, createdAt).Scan(&listId); err != nil {
+							logError(fmt.Errorf("failed to import keyword list %s: %v", label, err))
+						}
+					} else {
+						query := `INSERT INTO "keywordLists" ("label", "description", "keywords", "order", "createdAt") VALUES (?, ?, ?, ?, ?)`
+						if _, err := admin.Controller.Database.Sql.Exec(query, label, description, string(keywordsJson), order, createdAt); err != nil {
+							logError(fmt.Errorf("failed to import keyword list %s: %v", label, err))
+						}
 					}
-				} else {
-					query := `INSERT INTO "keywordLists" ("label", "description", "keywords", "order", "createdAt") VALUES (?, ?, ?, ?, ?)`
-					if _, err := admin.Controller.Database.Sql.Exec(query, label, description, string(keywordsJson), order, createdAt); err != nil {
-						logError(fmt.Errorf("failed to import keyword list %s: %v", label, err))
-					}
-				}
 				}
 			}
 
@@ -846,7 +1317,7 @@ func (admin *Admin) ConfigHandler(w http.ResponseWriter, r *http.Request) {
 					userId := uint64(getFloat64FromMap(prefMap, "userId"))
 					systemId := uint64(getFloat64FromMap(prefMap, "systemId"))
 					talkgroupId := uint64(getFloat64FromMap(prefMap, "talkgroupId"))
-					
+
 					// Skip if essential fields are missing
 					if userId == 0 || systemId == 0 || talkgroupId == 0 {
 						continue
@@ -950,17 +1421,17 @@ func (admin *Admin) StripeSyncHandler(w http.ResponseWriter, r *http.Request) {
 	// Fetch all customers from Stripe
 	params := &stripe.CustomerListParams{}
 	params.Limit = stripe.Int64(100) // Fetch in batches of 100
-	
+
 	customersByEmail := make(map[string]*stripe.Customer)
 	iter := customer.List(params)
-	
+
 	for iter.Next() {
 		c := iter.Customer()
 		if c.Email != "" {
 			customersByEmail[strings.ToLower(c.Email)] = c
 		}
 	}
-	
+
 	if err := iter.Err(); err != nil {
 		admin.Controller.Logs.LogEvent(LogLevelError, fmt.Sprintf("Failed to fetch Stripe customers: %v", err))
 		w.WriteHeader(http.StatusInternalServerError)
@@ -982,7 +1453,7 @@ func (admin *Admin) StripeSyncHandler(w http.ResponseWriter, r *http.Request) {
 		if stripeCustomer, ok := customersByEmail[strings.ToLower(user.Email)]; ok {
 			// Found matching customer
 			user.StripeCustomerId = stripeCustomer.ID
-			
+
 			// Check for active subscription
 			if stripeCustomer.Subscriptions != nil && len(stripeCustomer.Subscriptions.Data) > 0 {
 				// Get the first subscription (most recent)
@@ -990,23 +1461,23 @@ func (admin *Admin) StripeSyncHandler(w http.ResponseWriter, r *http.Request) {
 				user.StripeSubscriptionId = sub.ID
 				user.SubscriptionStatus = string(sub.Status)
 			}
-			
+
 			// Update user
 			if err := admin.Controller.Users.Update(user); err != nil {
 				admin.Controller.Logs.LogEvent(LogLevelWarn, fmt.Sprintf("Failed to update user %s during Stripe sync: %v", user.Email, err))
 				continue
 			}
-			
+
 			matched++
 			updatedUsers = append(updatedUsers, map[string]interface{}{
-				"email":             user.Email,
-				"stripeCustomerId":  user.StripeCustomerId,
-				"subscriptionId":    user.StripeSubscriptionId,
+				"email":              user.Email,
+				"stripeCustomerId":   user.StripeCustomerId,
+				"subscriptionId":     user.StripeSubscriptionId,
 				"subscriptionStatus": user.SubscriptionStatus,
 			})
 		}
 	}
-	
+
 	// Write all updated users to database
 	if err := admin.Controller.Users.Write(admin.Controller.Database); err != nil {
 		admin.Controller.Logs.LogEvent(LogLevelError, fmt.Sprintf("Failed to write users after Stripe sync: %v", err))
@@ -1023,7 +1494,7 @@ func (admin *Admin) StripeSyncHandler(w http.ResponseWriter, r *http.Request) {
 	for _, user := range users {
 		userEmails[strings.ToLower(user.Email)] = true
 	}
-	
+
 	for email, customer := range customersByEmail {
 		if !userEmails[email] {
 			unmatchedCustomers = append(unmatchedCustomers, map[string]interface{}{
@@ -1107,7 +1578,7 @@ func (admin *Admin) GetConfig() map[string]any {
 			"pricingOptions":        group.PricingOptions,
 			"billingMode":           group.BillingMode,
 			"collectSalesTax":       group.CollectSalesTax,
-			"isPublicRegistration": group.IsPublicRegistration,
+			"isPublicRegistration":  group.IsPublicRegistration,
 			"allowAddExistingUsers": group.AllowAddExistingUsers,
 			"createdAt":             group.CreatedAt,
 		})
@@ -1173,16 +1644,16 @@ func (admin *Admin) GetConfig() map[string]any {
 		defer alertRows.Close()
 		for alertRows.Next() {
 			var (
-				prefId           uint64
-				userId           uint64
-				systemId         uint64
-				talkgroupId      uint64
-				alertEnabled     bool
-				toneAlerts       bool
-				keywordAlerts    bool
-				keywordsJson     string
-				keywordListIds   string
-				toneSetIds       string
+				prefId         uint64
+				userId         uint64
+				systemId       uint64
+				talkgroupId    uint64
+				alertEnabled   bool
+				toneAlerts     bool
+				keywordAlerts  bool
+				keywordsJson   string
+				keywordListIds string
+				toneSetIds     string
 			)
 
 			if err := alertRows.Scan(&prefId, &userId, &systemId, &talkgroupId, &alertEnabled, &toneAlerts, &keywordAlerts, &keywordsJson, &keywordListIds, &toneSetIds); err != nil {
@@ -1279,8 +1750,7 @@ func (admin *Admin) LoginHandler(w http.ResponseWriter, r *http.Request) {
 	// Check localhost restriction if enabled
 	clientIP := GetClientIP(r)
 	isLocalhost := IsLocalhostIP(clientIP)
-	
-	
+
 	if admin.Controller.Options.AdminLocalhostOnly {
 		if !isLocalhost {
 			log.Printf("Admin login attempt denied from non-localhost IP: %s", clientIP)
@@ -1291,7 +1761,7 @@ func (admin *Admin) LoginHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	
+
 	switch r.Method {
 	case http.MethodPost:
 		m := map[string]any{}
@@ -1877,7 +2347,6 @@ func (admin *Admin) getPaginatedTalkgroups(rr *RadioReferenceService, systemID, 
 	endIndex := startIndex + pageSize
 	currentIndex := 0
 
-
 	// Stream through categories and collect talkgroups for the requested page
 	for _, category := range categories {
 		// Check if context is cancelled
@@ -1930,7 +2399,6 @@ func (admin *Admin) getAllTalkgroupsStreaming(rr *RadioReferenceService, systemI
 		return nil, fmt.Errorf("failed to get categories: %v", err)
 	}
 
-
 	// Stream through categories and collect talkgroups
 	successfulCategories := 0
 	failedCategories := 0
@@ -1943,7 +2411,6 @@ func (admin *Admin) getAllTalkgroupsStreaming(rr *RadioReferenceService, systemI
 			return allTalkgroups, fmt.Errorf("timeout reached while streaming talkgroups at category %d/%d", i+1, len(categories))
 		default:
 		}
-
 
 		// Add retry logic for failed categories
 		var talkgroups []RadioReferenceTalkgroup
@@ -1964,7 +2431,6 @@ func (admin *Admin) getAllTalkgroupsStreaming(rr *RadioReferenceService, systemI
 			failedCategories++
 			continue // Continue with other categories instead of failing completely
 		}
-
 
 		if len(talkgroups) == 0 {
 			emptyCategories++
@@ -2010,7 +2476,6 @@ func (admin *Admin) getAllTalkgroupsWithTempFile(w http.ResponseWriter, rr *Radi
 	defer os.Remove(tempFile.Name()) // Clean up temp file
 	defer tempFile.Close()
 
-
 	// Write JSON array start
 	tempFile.WriteString("[\n")
 
@@ -2019,7 +2484,6 @@ func (admin *Admin) getAllTalkgroupsWithTempFile(w http.ResponseWriter, rr *Radi
 	if err != nil {
 		return fmt.Errorf("failed to get categories: %v", err)
 	}
-
 
 	// Set response headers for streaming
 	w.Header().Set("Content-Type", "application/json")
@@ -2044,7 +2508,6 @@ func (admin *Admin) getAllTalkgroupsWithTempFile(w http.ResponseWriter, rr *Radi
 		default:
 		}
 
-
 		// Get talkgroups for this category with retry logic
 		var talkgroups []RadioReferenceTalkgroup
 		var err error
@@ -2064,7 +2527,6 @@ func (admin *Admin) getAllTalkgroupsWithTempFile(w http.ResponseWriter, rr *Radi
 			failedCategories++
 			continue
 		}
-
 
 		if len(talkgroups) == 0 {
 			emptyCategories++
@@ -2195,7 +2657,6 @@ func (admin *Admin) getAllTalkgroupsWithProgress(w http.ResponseWriter, rr *Radi
 		if endIndex > totalCategories {
 			endIndex = totalCategories
 		}
-
 
 		// Check if context is cancelled (client disconnected)
 		select {
@@ -3315,7 +3776,7 @@ func (admin *Admin) RadioReferenceProgressTalkgroupsHandler(w http.ResponseWrite
 		return
 	}
 
-	log.Printf("RadioReferenceProgressTalkgroupsHandler: systemID=%d, groupFilter=%s, tagFilter=%s", 
+	log.Printf("RadioReferenceProgressTalkgroupsHandler: systemID=%d, groupFilter=%s, tagFilter=%s",
 		request.SystemID, request.GroupFilter, request.TagFilter)
 
 	rr := NewRadioReferenceService(
@@ -3607,7 +4068,7 @@ func (admin *Admin) UserUpdateHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		user.UserGroupId = *request.UserGroupId
 		effectiveUserGroupId = *request.UserGroupId
-		
+
 		// Remove group admin status if user is being moved to a different group (security: admin status should not persist across groups)
 		if user.IsGroupAdmin && oldGroupId != *request.UserGroupId {
 			user.IsGroupAdmin = false
@@ -3691,13 +4152,13 @@ func (admin *Admin) UserCreateHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Parse request body
 	var request struct {
-		Email       string  `json:"email"`
-		Password    string  `json:"password"`
-		FirstName   string  `json:"firstName"`
-		LastName    string  `json:"lastName"`
-		ZipCode     string  `json:"zipCode"`
-		UserGroupId uint64  `json:"userGroupId"`
-		Verified    *bool   `json:"verified"` // Optional, defaults to true for admin-created users
+		Email       string `json:"email"`
+		Password    string `json:"password"`
+		FirstName   string `json:"firstName"`
+		LastName    string `json:"lastName"`
+		ZipCode     string `json:"zipCode"`
+		UserGroupId uint64 `json:"userGroupId"`
+		Verified    *bool  `json:"verified"` // Optional, defaults to true for admin-created users
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
@@ -3744,7 +4205,7 @@ func (admin *Admin) UserCreateHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Create new user
 	user := NewUser(request.Email, request.Password)
-	
+
 	// Hash the password
 	if err := user.HashPassword(request.Password); err != nil {
 		log.Printf("Failed to hash password: %v", err)
@@ -3998,4 +4459,3 @@ func (admin *Admin) HallucinationRejectHandler(w http.ResponseWriter, r *http.Re
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"message": "Suggestion rejected"})
 }
-

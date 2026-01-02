@@ -137,16 +137,83 @@ func (queue *TranscriptionQueue) worker(workerId int) {
 		// Update call status to processing
 		queue.updateCallTranscriptionStatus(job.CallId, "processing")
 		
-		// Transcribe audio
-		result, err := queue.provider.Transcribe(job.Audio, TranscriptionOptions{
+		// Get the call to check if it has detected tones
+		call, err := queue.controller.Calls.GetCall(job.CallId)
+		audioToTranscribe := job.Audio
+		usedFilteredAudio := false
+		
+		// LOCK PENDING TONES: Prevent new tones from merging while this call transcribes
+		// This prevents unrelated tones (from a different incident) from being attached to this voice call
+		if call != nil && call.System != nil && call.Talkgroup != nil {
+			key := fmt.Sprintf("%d:%d", call.System.Id, call.Talkgroup.Id)
+			queue.controller.pendingTonesMutex.Lock()
+			if pending, exists := queue.controller.pendingTones[key]; exists && pending != nil && !pending.Locked {
+				pending.Locked = true
+				queue.controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("transcription worker %d: locked pending tones for talkgroup %d (call %d transcribing)", workerId, call.Talkgroup.TalkgroupRef, job.CallId))
+			}
+			queue.controller.pendingTonesMutex.Unlock()
+		}
+		
+		if err == nil && call != nil && call.ToneSequence != nil && len(call.ToneSequence.Tones) > 0 {
+			// Call has detected tones - filter them out before transcription
+			queue.controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("transcription worker %d: call %d has %d detected tones, filtering audio before transcription", workerId, job.CallId, len(call.ToneSequence.Tones)))
+			
+			// Calculate how much audio will remain after filtering
+			totalAudioDuration, durationErr := queue.controller.getAudioDuration(job.Audio, job.AudioMime)
+			totalToneDuration := 0.0
+			for _, tone := range call.ToneSequence.Tones {
+				totalToneDuration += tone.Duration
+			}
+			remainingDuration := totalAudioDuration - totalToneDuration
+			
+			// Only filter if we'll have meaningful audio left (at least 2 seconds)
+			const minRemainingDuration = 2.0
+			if durationErr == nil && remainingDuration < minRemainingDuration {
+				// Not enough audio left after removing tones - skip transcription entirely
+				queue.controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("transcription worker %d: call %d is mostly tones (%.1fs tones, %.1fs remaining < %.1fs minimum), skipping transcription", 
+					workerId, job.CallId, totalToneDuration, remainingDuration, minRemainingDuration))
+				
+				// Mark as completed with empty transcript (tone-only call)
+				queue.updateCallTranscriptionStatus(job.CallId, "completed")
+				emptyResult := &TranscriptionResult{
+					Transcript: "",
+					Confidence: 0.0,
+					Language:   queue.controller.Options.TranscriptionConfig.Language,
+				}
+				go queue.storeTranscription(job.CallId, emptyResult)
+				
+				duration := time.Since(startTime)
+				queue.controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("transcription worker %d skipped call %d in %v (tone-only)", workerId, job.CallId, duration))
+				continue
+			}
+			
+			filteredAudio, filterErr := queue.controller.ToneDetector.RemoveTonesFromAudio(job.Audio, job.AudioMime, call.ToneSequence.Tones)
+			if filterErr != nil {
+				// Filtering failed, use original audio
+				queue.controller.Logs.LogEvent(LogLevelWarn, fmt.Sprintf("transcription worker %d: audio filtering failed for call %d: %v, using original audio", workerId, job.CallId, filterErr))
+			} else if len(filteredAudio) >= 1000 {
+				// Filtering succeeded, use filtered audio
+				audioToTranscribe = filteredAudio
+				usedFilteredAudio = true
+				queue.controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("transcription worker %d: using filtered audio for call %d (removed %.1fs of tones, %.1fs remaining)", 
+					workerId, job.CallId, totalToneDuration, remainingDuration))
+			} else {
+				// Filtered audio too small (probably all tones, no voice)
+				queue.controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("transcription worker %d: filtered audio too small for call %d, using original", workerId, job.CallId))
+			}
+		}
+		
+		// Transcribe audio (filtered if tones were present, original otherwise)
+		result, err := queue.provider.Transcribe(audioToTranscribe, TranscriptionOptions{
 			Language:  queue.controller.Options.TranscriptionConfig.Language,
 			AudioMime: job.AudioMime,
 		})
 		
 		if err != nil {
+			errorMsg := err.Error()
 			queue.controller.Logs.LogEvent(LogLevelWarn, fmt.Sprintf("transcription worker %d failed for call %d: %v", workerId, job.CallId, err))
-			queue.controller.Logs.LogEvent(LogLevelWarn, fmt.Sprintf("transcription debug: apiURL=%s", queue.controller.Options.TranscriptionConfig.WhisperAPIURL))
-			queue.updateCallTranscriptionStatus(job.CallId, "failed")
+			queue.controller.Logs.LogEvent(LogLevelWarn, fmt.Sprintf("transcription debug: apiURL=%s, usedFilteredAudio=%v", queue.controller.Options.TranscriptionConfig.WhisperAPIURL, usedFilteredAudio))
+			queue.updateCallTranscriptionStatus(job.CallId, "failed", errorMsg)
 			continue
 		}
 		
@@ -234,8 +301,20 @@ func (queue *TranscriptionQueue) worker(workerId int) {
 }
 
 // updateCallTranscriptionStatus updates the transcription status for a call
-func (queue *TranscriptionQueue) updateCallTranscriptionStatus(callId uint64, status string) {
-	query := fmt.Sprintf(`UPDATE "calls" SET "transcriptionStatus" = '%s' WHERE "callId" = %d`, escapeQuotes(status), callId)
+func (queue *TranscriptionQueue) updateCallTranscriptionStatus(callId uint64, status string, failureReason ...string) {
+	var query string
+	if status == "failed" && len(failureReason) > 0 && failureReason[0] != "" {
+		// Store failure reason when status is failed
+		reason := escapeQuotes(failureReason[0])
+		// Truncate to reasonable length (500 chars)
+		if len(reason) > 500 {
+			reason = reason[:500]
+		}
+		query = fmt.Sprintf(`UPDATE "calls" SET "transcriptionStatus" = '%s', "transcriptionFailureReason" = '%s' WHERE "callId" = %d`, escapeQuotes(status), reason, callId)
+	} else {
+		// Clear failure reason when status is not failed
+		query = fmt.Sprintf(`UPDATE "calls" SET "transcriptionStatus" = '%s', "transcriptionFailureReason" = '' WHERE "callId" = %d`, escapeQuotes(status), callId)
+	}
 	if _, err := queue.controller.Database.Sql.Exec(query); err != nil {
 		queue.controller.Logs.LogEvent(LogLevelWarn, fmt.Sprintf("failed to update transcription status for call %d: %v", callId, err))
 	}

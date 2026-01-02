@@ -338,11 +338,14 @@ export interface Unit {
 
 enum url {
     alerts = 'alerts',
+    alertRetentionDays = 'alert-retention-days',
     config = 'config',
     login = 'login',
     logout = 'logout',
     logs = 'logs',
     password = 'password',
+    systemhealth = 'systemhealth',
+    toneDetectionIssueThreshold = 'tone-detection-issue-threshold',
 }
 
 const SESSION_STORAGE_KEY = 'rdio-scanner-admin-token';
@@ -489,6 +492,127 @@ export class RdioScannerAdminService implements OnDestroy {
         } catch (error) {
             this.errorHandler(error);
         }
+    }
+
+    async getSystemHealth(limit: number = 100, includeDismissed: boolean = false): Promise<{ alerts: any[], count: number }> {
+        try {
+            const res = await firstValueFrom(this.ngHttpClient.get<{ alerts: any[], count: number }>(
+                this.getUrl(url.systemhealth) + `?limit=${limit}&includeDismissed=${includeDismissed}`,
+                { headers: this.getHeaders(), responseType: 'json' },
+            ));
+            return res;
+        } catch (error) {
+            this.errorHandler(error);
+            throw error;
+        }
+    }
+
+    async getTranscriptionFailures(): Promise<{ calls: any[], count: number }> {
+        try {
+            const res = await firstValueFrom(this.ngHttpClient.get<{ calls: any[], count: number }>(
+                this.getUrl('transcription-failures'),
+                { headers: this.getHeaders(), responseType: 'json' },
+            ));
+            return res;
+        } catch (error) {
+            this.errorHandler(error);
+            throw error;
+        }
+    }
+
+    async resetTranscriptionFailures(callIds?: number[]): Promise<void> {
+        try {
+            await firstValueFrom(this.ngHttpClient.post(
+                this.getUrl('transcription-failures'),
+                { callIds: callIds || [] },
+                { headers: this.getHeaders(), responseType: 'json' },
+            ));
+        } catch (error) {
+            this.errorHandler(error);
+            throw error;
+        }
+    }
+
+    async getTranscriptionFailureThreshold(): Promise<number> {
+        try {
+            const res = await firstValueFrom(this.ngHttpClient.get<{ threshold: number }>(
+                this.getUrl('transcription-failure-threshold'),
+                { headers: this.getHeaders(), responseType: 'json' },
+            ));
+            return res.threshold || 10;
+        } catch (error) {
+            this.errorHandler(error);
+            throw error;
+        }
+    }
+
+    async setTranscriptionFailureThreshold(threshold: number): Promise<void> {
+        try {
+            await firstValueFrom(this.ngHttpClient.post(
+                this.getUrl('transcription-failure-threshold'),
+                { threshold },
+                { headers: this.getHeaders(), responseType: 'json' },
+            ));
+        } catch (error) {
+            this.errorHandler(error);
+            throw error;
+        }
+    }
+
+    async getAlertRetentionDays(): Promise<number> {
+        try {
+            const res = await firstValueFrom(this.ngHttpClient.get<{ retentionDays: number }>(
+                this.getUrl(url.alertRetentionDays),
+                { headers: this.getHeaders(), responseType: 'json' },
+            ));
+            return res.retentionDays || 5;
+        } catch (error) {
+            this.errorHandler(error);
+            throw error;
+        }
+    }
+
+    async setAlertRetentionDays(retentionDays: number): Promise<void> {
+        try {
+            await firstValueFrom(this.ngHttpClient.post(
+                this.getUrl(url.alertRetentionDays),
+                { retentionDays },
+                { headers: this.getHeaders(), responseType: 'json' },
+            ));
+        } catch (error) {
+            this.errorHandler(error);
+            throw error;
+        }
+    }
+
+    async getToneDetectionIssueThreshold(): Promise<number> {
+        try {
+            const res = await firstValueFrom(this.ngHttpClient.get<{ threshold: number }>(
+                this.getUrl(url.toneDetectionIssueThreshold),
+                { headers: this.getHeaders(), responseType: 'json' },
+            ));
+            return res.threshold || 5;
+        } catch (error) {
+            this.errorHandler(error);
+            throw error;
+        }
+    }
+
+    async setToneDetectionIssueThreshold(threshold: number): Promise<void> {
+        try {
+            await firstValueFrom(this.ngHttpClient.post(
+                this.getUrl(url.toneDetectionIssueThreshold),
+                { threshold },
+                { headers: this.getHeaders(), responseType: 'json' },
+            ));
+        } catch (error) {
+            this.errorHandler(error);
+            throw error;
+        }
+    }
+
+    getCallAudioUrl(callId: number): string {
+        return this.getUrl(`call-audio/${callId}`);
     }
 
     async login(password: string): Promise<boolean> {

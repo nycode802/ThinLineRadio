@@ -208,6 +208,33 @@ func (controller *Controller) DismissSystemAlert(alertId uint64) error {
 	return nil
 }
 
+// CleanupOldSystemAlerts removes system alerts older than retention days
+func (controller *Controller) CleanupOldSystemAlerts() {
+	retentionDays := controller.Options.AlertRetentionDays
+	if retentionDays == 0 {
+		retentionDays = 5 // Default: 5 days
+	}
+
+	cutoffTime := time.Now().Add(-time.Duration(retentionDays) * 24 * time.Hour).UnixMilli()
+	var query string
+	if controller.Database.Config.DbType == DbTypePostgresql {
+		query = `DELETE FROM "systemAlerts" WHERE "createdAt" < $1`
+	} else {
+		query = `DELETE FROM "systemAlerts" WHERE "createdAt" < ?`
+	}
+
+	result, err := controller.Database.Sql.Exec(query, cutoffTime)
+	if err != nil {
+		controller.Logs.LogEvent(LogLevelWarn, fmt.Sprintf("failed to cleanup old system alerts: %v", err))
+		return
+	}
+
+	rowsAffected, _ := result.RowsAffected()
+	if rowsAffected > 0 {
+		controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("cleaned up %d old system alerts (older than %d days)", rowsAffected, retentionDays))
+	}
+}
+
 // MonitorTranscriptionFailures monitors for transcription failures and creates system alerts
 func (controller *Controller) MonitorTranscriptionFailures() {
 	// Check for calls that have failed transcription
@@ -221,8 +248,14 @@ func (controller *Controller) MonitorTranscriptionFailures() {
 		return
 	}
 
-	// If we have more than 10 failures in last 24 hours, create an alert
-	if failureCount >= 10 {
+	// Use configurable threshold, default to 10
+	threshold := int(controller.Options.TranscriptionFailureThreshold)
+	if threshold <= 0 {
+		threshold = 10
+	}
+
+	// If we have more than threshold failures in last 24 hours, create an alert
+	if failureCount >= threshold {
 		data := &SystemAlertData{
 			Count:   failureCount,
 			Service: "transcription",
@@ -277,7 +310,11 @@ func (controller *Controller) MonitorToneDetectionIssues() {
 		}
 
 		// Only alert if there have been calls but no tones (might indicate tone detection issue)
-		if callCount >= 5 && toneCount == 0 {
+		threshold := int(controller.Options.ToneDetectionIssueThreshold)
+		if threshold <= 0 {
+			threshold = 5 // Default: 5 calls
+		}
+		if callCount >= threshold && toneCount == 0 {
 			data := &SystemAlertData{
 				TalkgroupId: talkgroupId,
 				SystemId:    systemId,

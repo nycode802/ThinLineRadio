@@ -279,13 +279,28 @@ export class RdioScannerAlertPreferencesComponent implements OnDestroy, OnInit {
             keywordListIds: pref.keywordListIds,
             toneSetIds: pref.toneSetIds,
         }));
+        
+        // DEBUG: Log what we're sending to the API
+        console.log('🚀 [TONE SET DEBUG] Saving preferences to API:');
+        prefsArray.forEach(pref => {
+            if (pref.toneAlerts) {
+                console.log(`   System ${pref.systemRef}, Talkgroup ${pref.talkgroupRef}:`, {
+                    toneAlerts: pref.toneAlerts,
+                    toneSetIds: pref.toneSetIds,
+                    isEmpty: !pref.toneSetIds || pref.toneSetIds.length === 0,
+                    meaning: (!pref.toneSetIds || pref.toneSetIds.length === 0) ? 'ALL TONE SETS' : 'SPECIFIC TONE SETS'
+                });
+            }
+        });
+        
         this.alertsService.updatePreferences(prefsArray, this.pin).subscribe({
             next: () => {
                 this.saving = false;
+                console.log('✅ [TONE SET DEBUG] Preferences saved successfully');
                 alert('Preferences saved successfully');
             },
             error: (error) => {
-                console.error('Error saving preferences:', error);
+                console.error('❌ [TONE SET DEBUG] Error saving preferences:', error);
                 this.saving = false;
                 alert('Error saving preferences');
             },
@@ -448,8 +463,10 @@ export class RdioScannerAlertPreferencesComponent implements OnDestroy, OnInit {
         const index = pref.toneSetIds.indexOf(toneSetId);
         if (index >= 0) {
             pref.toneSetIds.splice(index, 1);
+            console.log(`🔧 [TONE SET DEBUG] Removed tone set "${toneSetId}". Current selection:`, pref.toneSetIds);
         } else {
             pref.toneSetIds.push(toneSetId);
+            console.log(`🔧 [TONE SET DEBUG] Added tone set "${toneSetId}". Current selection:`, pref.toneSetIds);
         }
     }
 

@@ -38,41 +38,41 @@ import (
 )
 
 type Controller struct {
-	Admin              *Admin
-	Api                *Api
-	Apikeys            *Apikeys
-	Calls              *Calls
-	Clients            *Clients
-	Config             *Config
-	Database           *Database
-	Delayer            *Delayer
-	Dirwatches         *Dirwatches
-	Downstreams        *Downstreams
-	FFMpeg             *FFMpeg
-	Groups             *Groups
-	Logs               *Logs
-	Options            *Options
-	Scheduler          *Scheduler
-	Systems            *Systems
-	Tags               *Tags
-	Users              *Users
-	UserGroups         *UserGroups
-	RegistrationCodes  *RegistrationCodes
-	TransferRequests   *TransferRequests
-	DeviceTokens       *DeviceTokens
-	EmailService       *EmailService
-	ToneDetector       *ToneDetector
-	TranscriptionQueue *TranscriptionQueue
-	KeywordMatcher     *KeywordMatcher
-	AlertEngine        *AlertEngine
+	Admin                 *Admin
+	Api                   *Api
+	Apikeys               *Apikeys
+	Calls                 *Calls
+	Clients               *Clients
+	Config                *Config
+	Database              *Database
+	Delayer               *Delayer
+	Dirwatches            *Dirwatches
+	Downstreams           *Downstreams
+	FFMpeg                *FFMpeg
+	Groups                *Groups
+	Logs                  *Logs
+	Options               *Options
+	Scheduler             *Scheduler
+	Systems               *Systems
+	Tags                  *Tags
+	Users                 *Users
+	UserGroups            *UserGroups
+	RegistrationCodes     *RegistrationCodes
+	TransferRequests      *TransferRequests
+	DeviceTokens          *DeviceTokens
+	EmailService          *EmailService
+	ToneDetector          *ToneDetector
+	TranscriptionQueue    *TranscriptionQueue
+	KeywordMatcher        *KeywordMatcher
+	AlertEngine           *AlertEngine
 	HallucinationDetector *HallucinationDetector
-	Register           chan *Client
-	Unregister         chan *Client
-	Ingest             chan *Call
-	running            bool
-	workerCancel       context.CancelFunc // Function to cancel worker context
-	workersWg          sync.WaitGroup     // WaitGroup to track worker goroutines
-	workerStats        struct {
+	Register              chan *Client
+	Unregister            chan *Client
+	Ingest                chan *Call
+	running               bool
+	workerCancel          context.CancelFunc // Function to cancel worker context
+	workersWg             sync.WaitGroup     // WaitGroup to track worker goroutines
+	workerStats           struct {
 		sync.Mutex
 		activeWorkers  int
 		totalCalls     int64
@@ -111,7 +111,9 @@ type WaitingShortCall struct {
 
 const (
 	// pendingToneTimeoutMinutes is how long to keep pending tones before expiring
-	pendingToneTimeoutMinutes = 5
+	// If tones don't get attached to a voice call within this time, they're considered orphaned
+	// Set to 2 minutes to prevent unrelated incidents from merging together
+	pendingToneTimeoutMinutes = 2
 	// shortCallWaitSeconds is how long to wait for a longer voice call before attaching to a short one
 	shortCallWaitSeconds = 15
 )
@@ -401,23 +403,23 @@ func (controller *Controller) IngestCall(call *Call) {
 				TagId:        tagId,
 			}
 
-		// Update label and name if provided (v6 style)
-		if len(call.Meta.TalkgroupLabel) > 0 && talkgroup.Label != call.Meta.TalkgroupLabel {
-			populated = true
-			talkgroup.Label = call.Meta.TalkgroupLabel
-		}
+			// Update label and name if provided (v6 style)
+			if len(call.Meta.TalkgroupLabel) > 0 && talkgroup.Label != call.Meta.TalkgroupLabel {
+				populated = true
+				talkgroup.Label = call.Meta.TalkgroupLabel
+			}
 
-		// Set Name: use TalkgroupName if available, otherwise fallback to Label
-		// This fixes SDR Trunk uploads that only send label/tgid but no name
-		if len(call.Meta.TalkgroupName) > 0 {
-			populated = true
-			talkgroup.Name = call.Meta.TalkgroupName
-		} else {
-			// When TalkgroupName is not available, use Label as fallback
-			// instead of leaving it as the talkgroup ID number
-			populated = true
-			talkgroup.Name = talkgroup.Label
-		}
+			// Set Name: use TalkgroupName if available, otherwise fallback to Label
+			// This fixes SDR Trunk uploads that only send label/tgid but no name
+			if len(call.Meta.TalkgroupName) > 0 {
+				populated = true
+				talkgroup.Name = call.Meta.TalkgroupName
+			} else {
+				// When TalkgroupName is not available, use Label as fallback
+				// instead of leaving it as the talkgroup ID number
+				populated = true
+				talkgroup.Name = talkgroup.Label
+			}
 
 			system.Talkgroups.List = append(system.Talkgroups.List, talkgroup)
 		}
@@ -566,15 +568,27 @@ func (controller *Controller) IngestCall(call *Call) {
 		// IMMEDIATE: Emit call to clients (users can play NOW - zero delay)
 		controller.EmitCall(call)
 
-		// PARALLEL: Process tone detection (fast, async)
-		go controller.processToneDetection(call)
+		// Check if tone detection is enabled for this talkgroup
+		shouldDetectTones := call.Talkgroup != nil && call.Talkgroup.ToneDetectionEnabled && len(call.Talkgroup.ToneSets) > 0
+
+		if shouldDetectTones {
+			// SEQUENTIAL: Process tone detection FIRST (fast, 100-500ms typically)
+			// We need this to complete before transcription to:
+			// 1. Calculate remaining audio after tone removal
+			// 2. Skip transcription if mostly tones (saves API costs)
+			controller.processToneDetection(call)
+
+			// After tone detection, queue transcription with tone-aware decision
+			go controller.queueTranscriptionIfNeeded(call)
+		} else {
+			// No tone detection needed - queue transcription immediately
+			// PARALLEL: Queue transcription if needed (slow, async)
+			go controller.queueTranscriptionIfNeeded(call)
+		}
 
 		// Note: Pending tones are checked and attached AFTER transcription completes
 		// This ensures we only attach pending tones to calls that actually have voice (not tone-only)
 		// See transcription_queue.go where checkAndAttachPendingTones is called after transcription confirms voice
-
-		// PARALLEL: Queue transcription if needed (slow, async)
-		go controller.queueTranscriptionIfNeeded(call)
 	} else {
 		logError(err)
 	}
@@ -698,6 +712,13 @@ func (controller *Controller) processToneDetection(call *Call) {
 
 		// Update call in database (async, non-blocking)
 		go controller.updateCallToneSequence(call.Id, toneSequence)
+
+		// IMMEDIATE PRE-ALERT: Send notification as soon as tones are detected
+		// This allows users to tune in right away without waiting for transcription
+		if len(matchedToneSets) > 0 {
+			controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("sending pre-alert for call %d with %d matched tone sets", call.Id, len(matchedToneSets)))
+			go controller.AlertEngine.TriggerPreAlerts(call)
+		}
 
 		// If transcription is still pending, we don't know yet if this is tone-only or has voice
 		// Store as pending and wait for transcription to complete
@@ -834,9 +855,66 @@ func (controller *Controller) storePendingTones(call *Call, toneSequence *ToneSe
 	controller.pendingTonesMutex.Lock()
 	defer controller.pendingTonesMutex.Unlock()
 
-	// Store or merge with existing pending tones (for stacked tones across multiple calls)
+	// Check if pending tones are "locked" (claimed by an ongoing transcription)
+	// If locked, store in "nextPending" slot to be promoted after lock clears
 	existing, exists := controller.pendingTones[key]
+	if exists && existing != nil && existing.Locked {
+		// Pending tones are locked by an ongoing transcription
+		// Store these new tones in the "next pending" slot
+		// They'll become the new pending tones after the current transcription completes
+		nextKey := key + ":next"
 
+		controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("pending tones for talkgroup %d are locked, storing call %d tones in next slot", call.Talkgroup.TalkgroupRef, call.Id))
+
+		// Check if there's already a "next pending" - merge with it (stacked tones for next incident)
+		nextPending, nextExists := controller.pendingTones[nextKey]
+		if !nextExists || nextPending == nil {
+			// Create new "next pending"
+			controller.pendingTones[nextKey] = &PendingToneSequence{
+				ToneSequence: toneSequence,
+				CallId:       call.Id,
+				Timestamp:    time.Now().UnixMilli(),
+				SystemId:     call.System.Id,
+				TalkgroupId:  call.Talkgroup.Id,
+				Locked:       false, // Next pending is not locked yet
+			}
+			controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("stored call %d tones in next pending slot for talkgroup %d", call.Id, call.Talkgroup.TalkgroupRef))
+		} else {
+			// Check if existing next pending tones are too old (expired)
+			existingAge := time.Now().UnixMilli() - nextPending.Timestamp
+			maxAge := int64(pendingToneTimeoutMinutes) * 60 * 1000 // Convert minutes to milliseconds
+
+			if existingAge > maxAge {
+				// Existing next pending tones are too old - replace instead of merge
+				ageMinutes := float64(existingAge) / 60000.0
+				controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("existing next pending tones for call %d are too old (%.1f minutes), replacing with new tones from call %d", nextPending.CallId, ageMinutes, call.Id))
+
+				controller.pendingTones[nextKey] = &PendingToneSequence{
+					ToneSequence: toneSequence,
+					CallId:       call.Id,
+					Timestamp:    time.Now().UnixMilli(),
+					SystemId:     call.System.Id,
+					TalkgroupId:  call.Talkgroup.Id,
+					Locked:       false,
+				}
+			} else {
+				// Merge with existing "next pending" (multiple tone-only calls for next incident)
+				controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("merging next pending: call %d (existing) + call %d (new)", nextPending.CallId, call.Id))
+				mergedSequence := controller.mergePendingTones(nextPending.ToneSequence, toneSequence)
+				nextPending.ToneSequence = mergedSequence
+				nextPending.CallId = call.Id                   // Update to most recent call
+				nextPending.Timestamp = time.Now().UnixMilli() // Update timestamp
+				controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("merged next pending tones for talkgroup %d", call.Talkgroup.TalkgroupRef))
+			}
+		}
+
+		if controller.DebugLogger != nil {
+			controller.DebugLogger.LogPendingTones("NEXT_SLOT", call.Id, call.Talkgroup.TalkgroupRef, "Stored in next pending slot (current pending locked)")
+		}
+		return
+	}
+
+	// Store or merge with existing pending tones (for stacked tones across multiple calls)
 	if !exists || existing == nil {
 		// Create new pending tone sequence
 		controller.pendingTones[key] = &PendingToneSequence{
@@ -859,11 +937,35 @@ func (controller *Controller) storePendingTones(call *Call, toneSequence *ToneSe
 			}
 			controller.DebugLogger.LogPendingTones("STORED", call.Id, call.Talkgroup.TalkgroupRef, fmt.Sprintf("New pending tones stored | ToneSets: %v", toneSetLabels))
 		}
-		
+
 		// Start a timer to check if tones are orphaned (no new tones within 60 seconds)
 		// If they're still pending after 60 seconds, send an alert for "tones detected but no voice call"
 		go controller.checkOrphanedTones(key, call.Id, time.Now().UnixMilli())
 	} else {
+		// Check if existing pending tones are too old (expired)
+		existingAge := time.Now().UnixMilli() - existing.Timestamp
+		maxAge := int64(pendingToneTimeoutMinutes) * 60 * 1000 // Convert minutes to milliseconds
+
+		if existingAge > maxAge {
+			// Existing pending tones are too old - replace instead of merge
+			ageMinutes := float64(existingAge) / 60000.0
+			controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("existing pending tones for call %d are too old (%.1f minutes), replacing with new tones from call %d", existing.CallId, ageMinutes, call.Id))
+
+			controller.pendingTones[key] = &PendingToneSequence{
+				ToneSequence: toneSequence,
+				CallId:       call.Id,
+				Timestamp:    time.Now().UnixMilli(),
+				SystemId:     call.System.Id,
+				TalkgroupId:  call.Talkgroup.Id,
+			}
+
+			if controller.DebugLogger != nil {
+				controller.DebugLogger.LogPendingTones("REPLACED", call.Id, call.Talkgroup.TalkgroupRef, fmt.Sprintf("Replaced expired pending tones from call %d (age: %.1f min)", existing.CallId, ageMinutes))
+			}
+			return
+		}
+
+		// Existing pending tones are fresh enough to merge
 		// Log that we're merging with existing pending tones
 		existingToneSetLabels := []string{}
 		if existing.ToneSequence.MatchedToneSets != nil {
@@ -946,64 +1048,126 @@ func (controller *Controller) storePendingTones(call *Call, toneSequence *ToneSe
 	}
 }
 
+// mergePendingTones merges two tone sequences together (for stacked tones across multiple calls)
+func (controller *Controller) mergePendingTones(existing *ToneSequence, new *ToneSequence) *ToneSequence {
+	if existing == nil {
+		return new
+	}
+	if new == nil {
+		return existing
+	}
+
+	// Combine all tones from both sequences
+	combinedTones := append(existing.Tones, new.Tones...)
+
+	// Create merged sequence with combined tones
+	merged := &ToneSequence{
+		Tones:           combinedTones,
+		ATone:           existing.ATone,          // Keep first detected A-tone
+		BTone:           existing.BTone,          // Keep first detected B-tone
+		LongTone:        existing.LongTone,       // Keep first detected long tone
+		MatchedToneSet:  existing.MatchedToneSet, // Will be updated below
+		MatchedToneSets: []*ToneSet{},
+	}
+
+	// Accumulate ALL matched tone sets across calls (don't overwrite, merge)
+	matchedToneSetMap := make(map[string]*ToneSet)
+
+	// Add existing matched tone sets
+	if existing.MatchedToneSets != nil {
+		for _, ts := range existing.MatchedToneSets {
+			if ts != nil && ts.Id != "" {
+				matchedToneSetMap[ts.Id] = ts
+			}
+		}
+	}
+	if existing.MatchedToneSet != nil && existing.MatchedToneSet.Id != "" {
+		matchedToneSetMap[existing.MatchedToneSet.Id] = existing.MatchedToneSet
+	}
+
+	// Add new matched tone sets
+	if new.MatchedToneSets != nil {
+		for _, ts := range new.MatchedToneSets {
+			if ts != nil && ts.Id != "" {
+				matchedToneSetMap[ts.Id] = ts
+			}
+		}
+	}
+	if new.MatchedToneSet != nil && new.MatchedToneSet.Id != "" {
+		matchedToneSetMap[new.MatchedToneSet.Id] = new.MatchedToneSet
+	}
+
+	// Convert map back to slice
+	if len(matchedToneSetMap) > 0 {
+		merged.MatchedToneSets = make([]*ToneSet, 0, len(matchedToneSetMap))
+		for _, ts := range matchedToneSetMap {
+			merged.MatchedToneSets = append(merged.MatchedToneSets, ts)
+		}
+		// Set first one for backward compatibility
+		merged.MatchedToneSet = merged.MatchedToneSets[0]
+	}
+
+	return merged
+}
+
 // checkOrphanedTones waits 60 seconds and checks if pending tones are still there without being attached
 // If so, triggers an alert for "tones detected but no voice call available"
 func (controller *Controller) checkOrphanedTones(key string, callId uint64, timestamp int64) {
 	// Wait 60 seconds
 	time.Sleep(60 * time.Second)
-	
+
 	controller.pendingTonesMutex.Lock()
 	pending, exists := controller.pendingTones[key]
 	controller.pendingTonesMutex.Unlock()
-	
+
 	if !exists || pending == nil {
 		// Tones were already attached or expired - nothing to do
 		return
 	}
-	
+
 	// Check if this is still the same pending tone sequence (same timestamp)
 	// If timestamp changed, it means new tones were added (merged), so don't trigger alert yet
 	if pending.Timestamp != timestamp {
 		// Timestamp changed - new tones were merged, so not orphaned
 		return
 	}
-	
+
 	// Tones have been sitting for 60 seconds without new tones or voice call
 	// Trigger an alert for the tone-only call
 	controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("orphaned tones detected after 60 seconds for call %d - triggering alert without voice", callId))
-	
+
 	if controller.DebugLogger != nil {
 		controller.DebugLogger.LogPendingTones("ORPHANED", callId, 0, "Tones pending for 60+ seconds without voice - triggering alert")
 	}
-	
+
 	// Load the original call that had the tones
 	call, err := controller.Calls.GetCall(callId)
 	if err != nil || call == nil {
 		controller.Logs.LogEvent(LogLevelWarn, fmt.Sprintf("failed to load orphaned tone call %d: %v", callId, err))
 		return
 	}
-	
+
 	// Ensure the call has the tone sequence attached
 	if call.ToneSequence == nil && pending.ToneSequence != nil {
 		call.ToneSequence = pending.ToneSequence
 		call.HasTones = true
 	}
-	
+
 	// Set a special transcript to indicate no voice was available
 	if call.Transcript == "" {
 		call.Transcript = "TONES DETECTED - NO VOICE CALL AVAILABLE"
-		
+
 		// Update the call in the database with this transcript
-		query := fmt.Sprintf(`UPDATE "calls" SET "transcript" = '%s', "transcriptionStatus" = 'completed' WHERE "callId" = %d`, 
+		query := fmt.Sprintf(`UPDATE "calls" SET "transcript" = '%s', "transcriptionStatus" = 'completed' WHERE "callId" = %d`,
 			escapeQuotes(call.Transcript), callId)
 		if _, err := controller.Database.Sql.Exec(query); err != nil {
 			controller.Logs.LogEvent(LogLevelWarn, fmt.Sprintf("failed to update orphaned call transcript: %v", err))
 		}
 	}
-	
+
 	// Don't remove from pending yet - let the normal timeout (5 minutes) handle that
 	// This allows a late voice call to still attach if it comes in
-	
+
 	// Trigger tone alerts for this orphaned call
 	if controller.AlertEngine != nil {
 		go controller.AlertEngine.TriggerToneAlerts(call)
@@ -1088,6 +1252,28 @@ func (controller *Controller) checkAndAttachPendingTones(call *Call) bool {
 	// Clear pending tones (only attach to FIRST voice call)
 	controller.pendingTonesMutex.Lock()
 	delete(controller.pendingTones, key)
+
+	// Check if there are "next pending" tones waiting (arrived during lock)
+	// Promote them to current pending for the next voice call
+	nextKey := key + ":next"
+	if nextPending, nextExists := controller.pendingTones[nextKey]; nextExists && nextPending != nil {
+		// Promote next pending to current pending
+		controller.pendingTones[key] = nextPending
+		delete(controller.pendingTones, nextKey)
+		controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("promoted next pending tones to current pending for talkgroup %d (from call %d)", call.Talkgroup.Id, nextPending.CallId))
+
+		if controller.DebugLogger != nil {
+			toneSetLabels := []string{}
+			if nextPending.ToneSequence != nil && nextPending.ToneSequence.MatchedToneSets != nil {
+				for _, ts := range nextPending.ToneSequence.MatchedToneSets {
+					if ts != nil {
+						toneSetLabels = append(toneSetLabels, ts.Label)
+					}
+				}
+			}
+			controller.DebugLogger.LogPendingTones("PROMOTED", nextPending.CallId, call.Talkgroup.TalkgroupRef, fmt.Sprintf("Next pending promoted to current | ToneSets: %v", toneSetLabels))
+		}
+	}
 	controller.pendingTonesMutex.Unlock()
 
 	audioDuration, err := controller.getAudioDuration(call.Audio, call.AudioMime)
@@ -1189,16 +1375,16 @@ func (controller *Controller) cleanTranscript(transcript string, callId uint64) 
 		if pattern == "" {
 			continue
 		}
-		
+
 		patternUpper := strings.ToUpper(strings.TrimSpace(pattern))
 		transcriptUpper := strings.ToUpper(cleanedTranscript)
-		
+
 		if strings.Contains(transcriptUpper, patternUpper) {
 			// Remove the pattern (case-insensitive)
 			// Find all occurrences and remove them while preserving case of surrounding text
 			result := strings.Builder{}
 			searchIn := cleanedTranscript
-			
+
 			// Simple case-insensitive replacement
 			for {
 				idx := strings.Index(strings.ToUpper(searchIn), patternUpper)
@@ -1206,13 +1392,13 @@ func (controller *Controller) cleanTranscript(transcript string, callId uint64) 
 					result.WriteString(searchIn)
 					break
 				}
-				
+
 				// Write everything before the pattern
 				result.WriteString(searchIn[:idx])
 				// Skip the pattern
 				searchIn = searchIn[idx+len(pattern):]
 			}
-			
+
 			cleanedTranscript = result.String()
 			removedPatterns = append(removedPatterns, pattern)
 		}
@@ -1222,12 +1408,12 @@ func (controller *Controller) cleanTranscript(transcript string, callId uint64) 
 	if len(removedPatterns) > 0 {
 		cleanedTranscript = strings.Join(strings.Fields(cleanedTranscript), " ")
 		cleanedTranscript = strings.TrimSpace(cleanedTranscript)
-		
+
 		if controller.DebugLogger != nil {
-			controller.DebugLogger.WriteLog(fmt.Sprintf("[HALLUCINATION_CLEAN] Call=%d | Original: %q | Cleaned: %q | Removed: %v", 
+			controller.DebugLogger.WriteLog(fmt.Sprintf("[HALLUCINATION_CLEAN] Call=%d | Original: %q | Cleaned: %q | Removed: %v",
 				callId, transcript, cleanedTranscript, removedPatterns))
 		}
-		
+
 		return cleanedTranscript, true
 	}
 
@@ -1564,6 +1750,28 @@ func (controller *Controller) queueTranscriptionIfNeeded(call *Call) {
 			if audioDuration < minDuration {
 				controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("skipping transcription for call %d: duration %.1fs is less than minimum %.1fs", call.Id, audioDuration, minDuration))
 				return
+			}
+
+			// NEW: Check if audio is mostly tones (would result in very short remaining audio after tone removal)
+			if call.HasTones && call.ToneSequence != nil && len(call.ToneSequence.Tones) > 0 {
+				// Calculate total tone duration
+				toneDuration := 0.0
+				for _, tone := range call.ToneSequence.Tones {
+					toneDuration += tone.Duration
+				}
+
+				// Calculate remaining audio duration after tones would be removed
+				remainingDuration := audioDuration - toneDuration
+				const minRemainingDuration = 2.0 // Same threshold as in transcription_queue worker
+
+				if remainingDuration < minRemainingDuration {
+					controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("skipping transcription for call %d: remaining audio after tone removal (%.1fs) is less than minimum (%.1fs) - likely tone-only", call.Id, remainingDuration, minRemainingDuration))
+					// Mark as completed so pending tones don't wait forever
+					updateQuery := fmt.Sprintf(`UPDATE "calls" SET "transcriptionStatus" = 'completed' WHERE "callId" = %d`, call.Id)
+					controller.Database.Sql.Exec(updateQuery)
+					return
+				}
+				controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("call %d has sufficient remaining audio after tone removal (%.1fs of %.1fs total, %.1fs tones)", call.Id, remainingDuration, audioDuration, toneDuration))
 			}
 
 			// Duration check passed, now check if any user has alerts enabled
@@ -2433,14 +2641,14 @@ func (controller *Controller) Terminate() {
 	if controller.workerCancel != nil {
 		controller.workerCancel()
 		log.Println("Worker context cancelled, waiting for workers to finish...")
-		
+
 		// Wait for workers to finish with a timeout
 		done := make(chan struct{})
 		go func() {
 			controller.workersWg.Wait()
 			close(done)
 		}()
-		
+
 		select {
 		case <-done:
 			log.Println("All workers finished gracefully")
