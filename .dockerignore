@@ -33,7 +33,7 @@ relay-server/server
 client/dist/
 client/node_modules/
 client/.angular/
-server/webapp/
+# Note: server/webapp/ is excluded from host but built inside Docker
 
 # =============================================================================
 # Node.js

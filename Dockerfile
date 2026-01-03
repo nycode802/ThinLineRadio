@@ -7,23 +7,23 @@
 # =============================================================================
 FROM node:16-alpine AS client-builder
 
-WORKDIR /build/client
+WORKDIR /build
 
 # Copy package files first for better caching
-COPY client/package*.json ./
+COPY client/package*.json ./client/
 
 # Install dependencies
+WORKDIR /build/client
 RUN npm ci --legacy-peer-deps
 
 # Copy client source code
 COPY client/ ./
 
-# Build production bundle
+# Build production bundle (outputs to /build/server/webapp/)
 RUN npm run build
 
 # Verify build output
-RUN ls -la /build/client/../server/webapp/ || echo "Webapp directory not found, checking alternatives..." && \
-    find /build -name "webapp" -o -name "dist" 2>/dev/null || true
+RUN ls -la /build/server/webapp/ && echo "Webapp build successful"
 
 # =============================================================================
 # Stage 2: Build Go Server
