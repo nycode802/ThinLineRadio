@@ -139,8 +139,8 @@ build_platform_arch() {
     echo -e "${GREEN}  ✓ Server built successfully${NC}"
     cd ..
     
-    # Create distribution directory
-    DIST_DIR="dist-${PLATFORM}-${ARCH}"
+    # Create distribution directory inside releases folder
+    DIST_DIR="$RELEASES_DIR/dist-${PLATFORM}-${ARCH}"
     echo "  Creating distribution package..."
     
     # Clean and create dist directory
@@ -402,20 +402,20 @@ build_darwin() {
     done
     
     # Create universal binary if on macOS and lipo is available
-    if [[ "$OSTYPE" == "darwin"* ]] && command -v lipo &> /dev/null && [ -d "dist-darwin-amd64" ] && [ -d "dist-darwin-arm64" ]; then
+    if [[ "$OSTYPE" == "darwin"* ]] && command -v lipo &> /dev/null && [ -d "$RELEASES_DIR/dist-darwin-amd64" ] && [ -d "$RELEASES_DIR/dist-darwin-arm64" ]; then
         echo -e "${YELLOW}Creating universal binary...${NC}"
-        DIST_DIR_UNIVERSAL="dist-darwin-universal"
+        DIST_DIR_UNIVERSAL="$RELEASES_DIR/dist-darwin-universal"
         rm -rf "$DIST_DIR_UNIVERSAL"
         mkdir -p "$DIST_DIR_UNIVERSAL"
         
         lipo -create \
-            "dist-darwin-amd64/thinline-radio" \
-            "dist-darwin-arm64/thinline-radio" \
+            "$RELEASES_DIR/dist-darwin-amd64/thinline-radio" \
+            "$RELEASES_DIR/dist-darwin-arm64/thinline-radio" \
             -output "$DIST_DIR_UNIVERSAL/thinline-radio"
         
         chmod +x "$DIST_DIR_UNIVERSAL/thinline-radio"
         
-        cp dist-darwin-amd64/thinline-radio.ini.template "$DIST_DIR_UNIVERSAL/"
+        cp "$RELEASES_DIR/dist-darwin-amd64/thinline-radio.ini.template" "$DIST_DIR_UNIVERSAL/"
         
         ARCHIVE_NAME_UNIVERSAL="thinline-radio-darwin-universal-v${VERSION}.tar.gz"
         tar -czf "$RELEASES_DIR/$ARCHIVE_NAME_UNIVERSAL" -C "$DIST_DIR_UNIVERSAL" .
@@ -490,9 +490,9 @@ ls -1 "$RELEASES_DIR"/thinline-radio-*-v${VERSION}.* 2>/dev/null | while read fi
     echo "  ✓ $(basename $file)"
 done
 echo ""
-echo "Distribution directories:"
-ls -d dist-* 2>/dev/null | while read dir; do
-    echo "  ✓ $dir/"
+echo "Distribution directories in $RELEASES_DIR/:"
+ls -d "$RELEASES_DIR"/dist-* 2>/dev/null | while read dir; do
+    echo "  ✓ $(basename $dir)/"
 done
 echo ""
 
