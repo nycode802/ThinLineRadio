@@ -1,5 +1,107 @@
 # Change log
 
+## Version 7.0 Beta 4 - Unreleased
+
+### Bug Fixes & Improvements
+- **Fixed Whisper transcription connection failures**
+  - Implemented automatic retry logic with exponential backoff (up to 3 retries)
+  - Enhanced HTTP connection pooling with proper timeout and keep-alive settings
+  - Added connection pool configuration: 100 max idle connections, 20 max per host
+  - Configured proper timeouts: 30s connection, 30s response headers, 90s idle
+  - Improved error detection and logging for connection-related failures
+  - Retry delays: 1s, 2s, 4s with automatic retry on transient network errors
+  - Added detailed troubleshooting documentation (docs/WHISPER-TROUBLESHOOTING.md)
+  - Fixes errors: "connection forcibly closed", "EOF", "wsarecv" network errors
+  - Files modified: server/transcription_whisper_api.go, server/transcription_queue.go
+
+- **Fixed dirwatch validation failure for default and dsdplus types**
+  - Fixed critical bug where dirwatch configurations with `systemId` and `talkgroupId` would fail validation with "no talkgroup" error
+  - Root cause: `ingestDefault()` and `ingestDSDPlus()` only set `call.Meta.*` fields, but `call.IsValid()` checks top-level `call.SystemId` and `call.TalkgroupId` fields
+  - Now correctly sets both Meta fields and top-level fields when dirwatch config has systemId/talkgroupId
+  - Includes overflow protection for 32-bit systems
+  - Affects: dirwatch type "default" and "dsdplus" (trunk-recorder and sdr-trunk were not affected)
+  - Files modified: server/dirwatch.go
+  - Thanks to Dustin Holbrook for detailed bug report and analysis
+
+- **Fixed talkgroup sorting persistence issue**
+  - Fixed bug where talkgroup order would randomly revert after saving
+  - Root cause: Display used sorted getter but underlying FormArray order wasn't updated during drag-and-drop
+  - Now properly reorders the FormArray itself when dragging talkgroups, ensuring sort persists on save
+  - Files modified: client/src/app/components/rdio-scanner/admin/config/systems/system/system.component.ts
+
+- **Fixed talkgroup access control not being enforced**
+  - Fixed critical bug where group/user talkgroup restrictions were ignored - users could see all talkgroups in a system
+  - Two separate issues fixed:
+    1. Call filtering: `controller.userHasAccess()` now checks group talkgroup access, not just system access
+    2. Config filtering: `systems.GetScopedSystems()` now filters talkgroups based on group restrictions
+  - Group permissions establish baseline, user permissions can further restrict
+  - Files modified: server/controller.go, server/system.go
+
+- **Added "Sort A-Z" button for talkgroups**
+  - New button to alphabetically sort all talkgroups in a system with one click
+  - Properly updates both order values and FormArray ordering for persistence
+  - Button disabled when no talkgroups exist
+  - Files modified: client/src/app/components/rdio-scanner/admin/config/systems/system/system.component.html, system.component.ts
+
+- **Added toggle Select/Unselect All button for talkgroups in user groups**
+  - Button dynamically changes between "Select All Talkgroups" and "Unselect All Talkgroups" based on current state
+  - Icon updates accordingly (select_all vs deselect)
+  - Provides one-click selection/deselection of all talkgroups when configuring group access
+  - Files modified: client/src/app/components/rdio-scanner/admin/config/user-groups/user-groups.component.html, user-groups.component.ts
+
+- **Added descriptive validation error messages in systems config**
+  - Error messages now display next to red (!) icons showing exactly what's wrong
+  - System-level errors: "Label required", "System ID required", "Duplicate system ID", "X invalid talkgroups", etc.
+  - Talkgroup errors: "ID required", "Duplicate ID", "Label required", "Name required", "Group required", "Tag required"
+  - Only shows specific validation errors, no generic messages
+  - Files modified: client/src/app/components/rdio-scanner/admin/config/systems/systems.component.html, systems.component.ts, system/system.component.html, system/system.component.ts
+
+- **Enhanced API call upload logging and diagnostics**
+  - Added detailed stack trace logging for incomplete call data uploads
+  - Now logs all call metadata when SDRTrunk or other sources send incomplete data
+  - Includes: SystemId, TalkgroupId, Audio length, Timestamp, SiteRef, Frequency, Units, Patches
+  - Also logs remote address and User-Agent for troubleshooting connection issues
+  - Test connections now explicitly logged with test connection indicator
+  - Example incomplete data log:
+    ```
+    api: INCOMPLETE CALL DATA RECEIVED:
+      Error: no talkgroup
+      SystemId: 12345
+      TalkgroupId: 0
+      Audio Length: 45632 bytes
+      Timestamp: 2025-01-03 12:34:56
+      SiteRef: 1
+      Frequency: 851025000
+      Remote Address: 192.168.1.100:54321
+      User-Agent: SDRTrunk/0.6.0
+    ```
+
+- **Enhanced API key logging and diagnostics**
+  - Added detailed logging when API keys are loaded on server startup
+  - Now shows total count, enabled count, and disabled count
+  - Added logging when API keys are saved: `Apikeys.Write: successfully saved X API keys to database`
+  - Displays warning message when no API keys are found (upload sources won't be able to connect)
+  - Example log: `Apikeys.Read: loaded 3 total API keys (2 enabled, 1 disabled)`
+  - **Note**: API keys do NOT have foreign key cascade constraints, so they will NOT be automatically deleted when other data changes
+  - **API keys ARE persisted to database** - they are saved via INSERT/UPDATE statements and loaded on every server restart
+  
+- **Enhanced device token logging and diagnostics**
+  - Added detailed logging when device tokens are loaded on server startup
+  - Now shows total token count and number of users with registered devices
+  - Displays warning message when no tokens are found (helpful for troubleshooting)
+  - Added deletion logging to track when and why device tokens are removed
+  - Example logs: `DeviceTokens.Load: loaded 15 total device tokens for 8 users`
+  
+- **Device Token Cascade Delete Documentation**
+  - **IMPORTANT**: Device tokens are automatically deleted when a user account is deleted
+  - This is enforced by a foreign key constraint: `ON DELETE CASCADE`
+  - If users report losing device tokens after server restart/update, possible causes:
+    1. User accounts were deleted or modified during maintenance
+    2. Database was restored from a backup that didn't include device tokens
+    3. Connected to wrong database instance (test vs production)
+  - Device tokens must be re-registered by users in the mobile app after such events
+  - Server logs will now clearly show: `DeviceTokens.Load: WARNING - No device tokens found in database`
+
 ## Version 7.0 Beta 3 - January 2, 2025
 
 ### User Registration Improvements

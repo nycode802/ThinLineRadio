@@ -129,7 +129,10 @@
             <mat-expansion-panel-header>
                 <mat-panel-title>
                     Talkgroups
-                    <mat-icon *ngIf="form.get('talkgroups')?.invalid" color="warn">error</mat-icon>
+                    <mat-icon *ngIf="form.get('talkgroups')?.invalid" color="warn" style="margin-left: 8px;">error</mat-icon>
+                    <span *ngIf="form.get('talkgroups')?.invalid" class="mat-caption" style="color: #f44336; margin-left: 4px;">
+                        ({{ getTalkgroupsErrorSummary() }})
+                    </span>
                 </mat-panel-title>
             </mat-expansion-panel-header>
             <ng-template matExpansionPanelContent>
@@ -137,7 +140,13 @@
                     <p class="mat-caption">System talkgroups, you can drag and drop talkgroups to rearrange them. They
                         will appear with the same order on the talkgroup selection panel unless the sort talkgroups
                         option is enabled.</p>
-                    <button type="button" mat-button color="accent" (click)="addTalkgroup()">New talkgroup</button>
+                    <div style="display: flex; gap: 8px;">
+                        <button type="button" mat-button color="accent" (click)="addTalkgroup()">New talkgroup</button>
+                        <button type="button" mat-button color="primary" (click)="sortTalkgroupsAlphabetically()" 
+                                [disabled]="talkgroups.length === 0">
+                            Sort A-Z
+                        </button>
+                    </div>
                 </div>
                 
                 <!-- Bulk Actions Section -->
@@ -206,7 +215,10 @@
                                 </mat-checkbox>
                                 <mat-icon cdkDragHandle>drag_indicator</mat-icon>
                                 {{ talkgroup.value.label?.trim() || 'NewTalkgroup' }}
-                                <mat-icon *ngIf="talkgroup.invalid" color="warn">error</mat-icon>
+                                <mat-icon *ngIf="talkgroup.invalid" color="warn" style="margin-left: 8px;">error</mat-icon>
+                                <span *ngIf="talkgroup.invalid && getTalkgroupErrors(talkgroup)" class="mat-caption" style="color: #f44336; margin-left: 4px;">
+                                    ({{ getTalkgroupErrors(talkgroup) }})
+                                </span>
                             </mat-panel-title>
                         </mat-expansion-panel-header>
                         <ng-template matExpansionPanelContent>

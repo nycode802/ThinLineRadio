@@ -211,8 +211,15 @@ func (queue *TranscriptionQueue) worker(workerId int) {
 		
 		if err != nil {
 			errorMsg := err.Error()
-			queue.controller.Logs.LogEvent(LogLevelWarn, fmt.Sprintf("transcription worker %d failed for call %d: %v", workerId, job.CallId, err))
-			queue.controller.Logs.LogEvent(LogLevelWarn, fmt.Sprintf("transcription debug: apiURL=%s, usedFilteredAudio=%v", queue.controller.Options.TranscriptionConfig.WhisperAPIURL, usedFilteredAudio))
+			queue.controller.Logs.LogEvent(LogLevelWarn, fmt.Sprintf("transcription worker %d failed for call %d after retries: %v", workerId, job.CallId, err))
+			queue.controller.Logs.LogEvent(LogLevelWarn, fmt.Sprintf("transcription debug: apiURL=%s, usedFilteredAudio=%v, error=%s", queue.controller.Options.TranscriptionConfig.WhisperAPIURL, usedFilteredAudio, errorMsg))
+			
+			// Check if this is a connection-related error that might indicate server issues
+			if strings.Contains(strings.ToLower(errorMsg), "connection") || 
+			   strings.Contains(strings.ToLower(errorMsg), "eof") {
+				queue.controller.Logs.LogEvent(LogLevelWarn, "Connection error detected. Check if Whisper API server is overloaded or network is unstable")
+			}
+			
 			queue.updateCallTranscriptionStatus(job.CallId, "failed", errorMsg)
 			continue
 		}

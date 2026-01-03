@@ -261,11 +261,32 @@ func (systems *Systems) GetScopedSystems(client *Client, groups *Groups, tags *T
 		return true
 	}
 
+	// Helper function to filter talkgroups based on group restrictions
+	filterTalkgroupsByGroup := func(system *System) *System {
+		// If no group restrictions, return system as-is
+		if userGroup == nil {
+			return system
+		}
+
+		// Filter talkgroups based on group access
+		filteredSystem := *system
+		filteredSystem.Talkgroups = NewTalkgroups()
+		
+		for _, tg := range system.Talkgroups.List {
+			if userGroup.HasTalkgroupAccess(uint64(system.SystemRef), tg.TalkgroupRef) {
+				filteredSystem.Talkgroups.List = append(filteredSystem.Talkgroups.List, tg)
+			}
+		}
+		
+		return &filteredSystem
+	}
+
 	if user == nil || user.systemsData == nil {
 		// No user-level restrictions, but still need to check group restrictions
 		for _, system := range systems.List {
 			if isSystemAllowed(system.SystemRef) {
-				rawSystems = append(rawSystems, *system)
+				filteredSystem := filterTalkgroupsByGroup(system)
+				rawSystems = append(rawSystems, *filteredSystem)
 			}
 		}
 
@@ -275,7 +296,8 @@ func (systems *Systems) GetScopedSystems(client *Client, groups *Groups, tags *T
 			// No user-level restrictions, but still need to check group restrictions
 			for _, system := range systems.List {
 				if isSystemAllowed(system.SystemRef) {
-					rawSystems = append(rawSystems, *system)
+					filteredSystem := filterTalkgroupsByGroup(system)
+					rawSystems = append(rawSystems, *filteredSystem)
 				}
 			}
 
@@ -284,7 +306,8 @@ func (systems *Systems) GetScopedSystems(client *Client, groups *Groups, tags *T
 				// User allows all systems, but still need to check group restrictions
 				for _, system := range systems.List {
 					if isSystemAllowed(system.SystemRef) {
-						rawSystems = append(rawSystems, *system)
+						filteredSystem := filterTalkgroupsByGroup(system)
+						rawSystems = append(rawSystems, *filteredSystem)
 					}
 				}
 			}
@@ -319,7 +342,9 @@ func (systems *Systems) GetScopedSystems(client *Client, groups *Groups, tags *T
 					switch v := mTalkgroups.(type) {
 					case string:
 						if mTalkgroups == "*" {
-							rawSystems = append(rawSystems, *system)
+							// User allows all talkgroups, but filter by group restrictions
+							filteredSystem := filterTalkgroupsByGroup(system)
+							rawSystems = append(rawSystems, *filteredSystem)
 							continue
 						}
 
@@ -331,6 +356,10 @@ func (systems *Systems) GetScopedSystems(client *Client, groups *Groups, tags *T
 							case float64:
 								rawTalkgroup, ok := system.Talkgroups.GetTalkgroupByRef(uint(v))
 								if !ok {
+									continue
+								}
+								// Also check group access for this talkgroup
+								if userGroup != nil && !userGroup.HasTalkgroupAccess(uint64(system.SystemRef), rawTalkgroup.TalkgroupRef) {
 									continue
 								}
 								rawSystem.Talkgroups.List = append(rawSystem.Talkgroups.List, rawTalkgroup)

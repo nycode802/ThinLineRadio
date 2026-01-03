@@ -212,6 +212,22 @@ func (apikeys *Apikeys) Read(db *Database) error {
 		return apikeys.List[i].Order < apikeys.List[j].Order
 	})
 
+	// Log API key loading summary with more detail
+	enabledCount := 0
+	disabledCount := 0
+	for _, apikey := range apikeys.List {
+		if apikey.Disabled {
+			disabledCount++
+		} else {
+			enabledCount++
+		}
+	}
+	fmt.Printf("Apikeys.Read: loaded %d total API keys (%d enabled, %d disabled)\n", 
+		len(apikeys.List), enabledCount, disabledCount)
+	if len(apikeys.List) == 0 {
+		fmt.Printf("Apikeys.Read: WARNING - No API keys found in database. Upload sources (SDRTrunk, etc.) will not be able to connect.\n")
+	}
+
 	return nil
 }
 
@@ -322,6 +338,9 @@ func (apikeys *Apikeys) Write(db *Database) error {
 		tx.Rollback()
 		return formatError(err, query)
 	}
+
+	// Log successful write operation
+	fmt.Printf("Apikeys.Write: successfully saved %d API keys to database\n", len(apikeys.List))
 
 	return nil
 }

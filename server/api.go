@@ -198,7 +198,9 @@ func (api *Api) CallUploadHandler(w http.ResponseWriter, r *http.Request) {
 		if len(call.Audio) == 0 && call.SystemId > 0 && call.TalkgroupId == 0 && call.Timestamp.IsZero() {
 			// This is likely a test connection from SDRTrunk
 			// SDRTrunk expects this to fail with "Incomplete call data: no talkgroup" to consider it successful
-			// Silently handle test connections without logging
+			// Log test connection details for debugging
+			log.Printf("api: Test connection detected - SystemId=%d TalkgroupId=%d AudioLen=%d Timestamp=%v",
+				call.SystemId, call.TalkgroupId, len(call.Audio), call.Timestamp)
 			api.exitWithError(w, http.StatusExpectationFailed, "Incomplete call data: no talkgroup")
 			return
 		}
@@ -207,6 +209,22 @@ func (api *Api) CallUploadHandler(w http.ResponseWriter, r *http.Request) {
 			api.HandleCall(key, call, w)
 		} else {
 			// Log full call data for debugging incomplete uploads
+			log.Printf("api: INCOMPLETE CALL DATA RECEIVED:")
+			log.Printf("  Error: %s", err.Error())
+			log.Printf("  SystemId: %d", call.SystemId)
+			log.Printf("  TalkgroupId: %d", call.TalkgroupId)
+			log.Printf("  Audio Length: %d bytes", len(call.Audio))
+			log.Printf("  Timestamp: %v", call.Timestamp)
+			log.Printf("  SiteRef: %d", call.SiteRef)
+			log.Printf("  Frequency: %d", call.Frequency)
+			log.Printf("  Units: %v", call.Units)
+			log.Printf("  Patches: %v", call.Patches)
+			log.Printf("  Meta.UnitRefs: %v", call.Meta.UnitRefs)
+			log.Printf("  Meta.UnitLabels: %v", call.Meta.UnitLabels)
+			log.Printf("  Remote Address: %s", r.RemoteAddr)
+			log.Printf("  User-Agent: %s", r.Header.Get("User-Agent"))
+			
+			// Also log to event system
 			api.Controller.Logs.LogEvent(LogLevelWarn, fmt.Sprintf("api: Incomplete call data: %s | SystemId=%d TalkgroupId=%d AudioLen=%d Timestamp=%v SiteRef=%d Frequency=%d",
 				err.Error(), call.SystemId, call.TalkgroupId, len(call.Audio), call.Timestamp, call.SiteRef, call.Frequency))
 			api.exitWithError(w, http.StatusExpectationFailed, fmt.Sprintf("Incomplete call data: %s\n", err.Error()))

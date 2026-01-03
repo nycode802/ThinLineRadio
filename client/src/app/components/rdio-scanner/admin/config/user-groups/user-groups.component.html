@@ -41,9 +41,10 @@
           
           <div *ngIf="access.id > 0" class="talkgroup-selection">
             <div class="talkgroup-controls">
-              <button mat-button type="button" (click)="selectAllTalkgroups(i)">
-                <mat-icon>select_all</mat-icon>
-                Select All Talkgroups
+              <button mat-button type="button" 
+                      (click)="hasTalkgroupsSelected(access) ? unselectAllTalkgroups(i) : selectAllTalkgroups(i)">
+                <mat-icon>{{ hasTalkgroupsSelected(access) ? 'deselect' : 'select_all' }}</mat-icon>
+                {{ hasTalkgroupsSelected(access) ? 'Unselect All Talkgroups' : 'Select All Talkgroups' }}
               </button>
               <span class="talkgroup-status">
                 {{ access.talkgroups === '*' ? 'All talkgroups' : getTalkgroupCount(access) + ' talkgroups selected' }}

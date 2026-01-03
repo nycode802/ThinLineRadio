@@ -2484,15 +2484,24 @@ func (controller *Controller) userHasAccess(user *User, call *Call) bool {
 	if user.UserGroupId > 0 {
 		group := controller.UserGroups.Get(user.UserGroupId)
 		if group != nil {
-			// Use group's system access
+			// Check if group has access to the system
 			if !group.HasSystemAccess(uint64(call.System.SystemRef)) {
 				return false
 			}
-			// Group allows this system, continue to check user-level if needed
+
+			// CRITICAL: Also check talkgroup-level access if talkgroup exists
+			if call.Talkgroup != nil {
+				if !group.HasTalkgroupAccess(uint64(call.System.SystemRef), call.Talkgroup.TalkgroupRef) {
+					return false
+				}
+			}
+
+			// Group allows this system and talkgroup
+			// Still check user-level restrictions (user can be more restrictive than group)
 		}
 	}
 
-	// Fall back to user-level access check
+	// Check user-level access (can further restrict access beyond group)
 	return user.HasAccess(call)
 }
 

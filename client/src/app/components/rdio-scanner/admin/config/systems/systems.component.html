@@ -16,7 +16,10 @@
             <mat-panel-title>
                 <mat-icon cdkDragHandle>drag_indicator</mat-icon>
                 {{ system.value.label?.trim() || 'NewSystem' }}
-                <mat-icon *ngIf="system.invalid" color="warn">error</mat-icon>
+                <mat-icon *ngIf="system.invalid" color="warn" style="margin-left: 8px;">error</mat-icon>
+                <span *ngIf="system.invalid && getFormErrors(system)" class="mat-caption" style="color: #f44336; margin-left: 4px;">
+                    ({{ getFormErrors(system) }})
+                </span>
             </mat-panel-title>
         </mat-expansion-panel-header>
         <rdio-scanner-admin-system #systemComponent [form]="system" [groups]="groups" [tags]="tags" (add)="add()" (remove)="remove(i)">

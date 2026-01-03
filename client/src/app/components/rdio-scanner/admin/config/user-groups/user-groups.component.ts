@@ -437,6 +437,16 @@ export class RdioScannerAdminUserGroupsComponent implements OnInit, OnChanges {
     access.talkgroups = '*';
   }
 
+  unselectAllTalkgroups(systemIndex: number): void {
+    const access = this.selectedSystemAccess[systemIndex];
+    if (!access) return;
+    access.talkgroups = [];
+  }
+
+  hasTalkgroupsSelected(access: {id: number, talkgroups: number[] | '*'}): boolean {
+    return access.talkgroups === '*' || (Array.isArray(access.talkgroups) && access.talkgroups.length > 0);
+  }
+
   getTalkgroupCount(access: {id: number, talkgroups: number[] | '*'}): number {
     if (access.talkgroups === '*') {
       return 0; // Will show "All talkgroups" instead

@@ -124,9 +124,26 @@ export class RdioScannerAdminSystemComponent {
 
     drop(event: CdkDragDrop<FormGroup[]>): void {
         if (event.previousIndex !== event.currentIndex) {
+            // Get the actual FormArray (not the sorted view)
+            const talkgroupsArray = this.form.get('talkgroups') as FormArray | null;
+            
+            if (!talkgroupsArray) {
+                return;
+            }
+
+            // Move items in the visual sorted array
             moveItemInArray(event.container.data, event.previousIndex, event.currentIndex);
 
+            // Update order values to match new positions
             event.container.data.forEach((dat, idx) => dat.get('order')?.setValue(idx + 1, { emitEvent: false }));
+
+            // CRITICAL: Reorder the actual FormArray to match the new sorted order
+            // This ensures getRawValue() returns talkgroups in the correct order
+            const reorderedControls = event.container.data.slice();
+            talkgroupsArray.clear({ emitEvent: false });
+            reorderedControls.forEach(control => {
+                talkgroupsArray.push(control, { emitEvent: false });
+            });
 
             this.form.markAsDirty();
         }
@@ -236,5 +253,72 @@ export class RdioScannerAdminSystemComponent {
         this.form.markAsDirty();
         this.unselectAllTalkgroups();
         this.bulkAssignGroupId = null;
+    }
+
+    sortTalkgroupsAlphabetically(): void {
+        const talkgroupsArray = this.form.get('talkgroups') as FormArray | null;
+        
+        if (!talkgroupsArray || talkgroupsArray.length === 0) {
+            return;
+        }
+
+        // Get all talkgroup controls and sort them alphabetically by label
+        const sortedControls = talkgroupsArray.controls.slice().sort((a, b) => {
+            const labelA = (a.get('label')?.value || '').toString().trim().toLowerCase();
+            const labelB = (b.get('label')?.value || '').toString().trim().toLowerCase();
+            return labelA.localeCompare(labelB);
+        });
+
+        // Update order values based on new alphabetical positions
+        sortedControls.forEach((control, idx) => {
+            control.get('order')?.setValue(idx + 1, { emitEvent: false });
+        });
+
+        // Rebuild the FormArray to match the new sorted order
+        talkgroupsArray.clear({ emitEvent: false });
+        sortedControls.forEach(control => {
+            talkgroupsArray.push(control, { emitEvent: false });
+        });
+
+        this.form.markAsDirty();
+        this.unselectAllTalkgroups();
+    }
+
+    getTalkgroupsErrorSummary(): string {
+        const talkgroupsArray = this.form.get('talkgroups') as FormArray | null;
+        if (!talkgroupsArray) return 'Invalid talkgroups';
+        
+        const invalidCount = talkgroupsArray.controls.filter(c => c.invalid).length;
+        return `${invalidCount} invalid talkgroup${invalidCount !== 1 ? 's' : ''}`;
+    }
+
+    getTalkgroupErrors(talkgroupForm: FormGroup): string {
+        const errors: string[] = [];
+        
+        if (talkgroupForm.get('talkgroupRef')?.hasError('required')) {
+            errors.push('ID required');
+        } else if (talkgroupForm.get('talkgroupRef')?.hasError('duplicate')) {
+            errors.push('Duplicate ID');
+        } else if (talkgroupForm.get('talkgroupRef')?.hasError('min')) {
+            errors.push('Invalid ID');
+        }
+        
+        if (talkgroupForm.get('label')?.hasError('required')) {
+            errors.push('Label required');
+        }
+        
+        if (talkgroupForm.get('name')?.hasError('required')) {
+            errors.push('Name required');
+        }
+
+        if (talkgroupForm.get('groupIds')?.hasError('required')) {
+            errors.push('Group required');
+        }
+
+        if (talkgroupForm.get('tagId')?.hasError('required')) {
+            errors.push('Tag required');
+        }
+
+        return errors.join(', ');
     }
 }

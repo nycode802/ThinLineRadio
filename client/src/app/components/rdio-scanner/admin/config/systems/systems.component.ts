@@ -97,4 +97,45 @@ export class RdioScannerAdminSystemsComponent {
 
         this.form.markAsDirty();
     }
+
+    getFormErrors(formGroup: FormGroup): string {
+        const errors: string[] = [];
+        
+        // Check each control in the form group
+        Object.keys(formGroup.controls).forEach(key => {
+            const control = formGroup.get(key);
+            if (control && control.invalid) {
+                if (key === 'label' && control.hasError('required')) {
+                    errors.push('Label required');
+                } else if (key === 'systemRef' && control.hasError('required')) {
+                    errors.push('System ID required');
+                } else if (key === 'systemRef' && control.hasError('duplicate')) {
+                    errors.push('Duplicate system ID');
+                } else if (key === 'systemRef' && control.hasError('min')) {
+                    errors.push('Invalid system ID');
+                } else if (key === 'talkgroups' && control.invalid) {
+                    // Count invalid talkgroups
+                    const talkgroupsArray = control as FormArray;
+                    const invalidCount = talkgroupsArray.controls.filter(c => c.invalid).length;
+                    if (invalidCount > 0) {
+                        errors.push(`${invalidCount} invalid talkgroup${invalidCount > 1 ? 's' : ''}`);
+                    }
+                } else if (key === 'sites' && control.invalid) {
+                    const sitesArray = control as FormArray;
+                    const invalidCount = sitesArray.controls.filter(c => c.invalid).length;
+                    if (invalidCount > 0) {
+                        errors.push(`${invalidCount} invalid site${invalidCount > 1 ? 's' : ''}`);
+                    }
+                } else if (key === 'units' && control.invalid) {
+                    const unitsArray = control as FormArray;
+                    const invalidCount = unitsArray.controls.filter(c => c.invalid).length;
+                    if (invalidCount > 0) {
+                        errors.push(`${invalidCount} invalid unit${invalidCount > 1 ? 's' : ''}`);
+                    }
+                }
+            }
+        });
+
+        return errors.join(', ');
+    }
 }

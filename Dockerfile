@@ -88,6 +88,10 @@ WORKDIR /app
 # Copy binary from builder stage
 COPY --from=server-builder /build/server/thinline-radio .
 
+# Copy Docker entrypoint script
+COPY docker-entrypoint.sh /app/
+RUN chmod +x /app/docker-entrypoint.sh
+
 # Copy documentation (only essential files, optional ones can fail)
 COPY LICENSE README.md ./
 
@@ -108,12 +112,20 @@ EXPOSE 3000 3443
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD wget --no-verbose --tries=1 --spider http://localhost:3000/ || exit 1
 
-# Default command
-# Can be overridden with docker run or docker-compose command
-ENTRYPOINT ["/app/thinline-radio"]
+# Environment variables (can be overridden)
+ENV DB_TYPE=postgresql \
+    DB_HOST=localhost \
+    DB_PORT=5432 \
+    DB_NAME=thinline_radio \
+    DB_USER="" \
+    DB_PASS="" \
+    LISTEN=0.0.0.0:3000
 
-# Default arguments (can be overridden)
-CMD ["-listen", "0.0.0.0:3000"]
+# Default entrypoint
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
+
+# Default command (empty, handled by entrypoint)
+CMD []
 
 # Labels for image metadata
 LABEL maintainer="Thinline Dynamic Solutions" \

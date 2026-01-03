@@ -17,6 +17,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"sync"
 	"time"
 )
@@ -59,6 +60,7 @@ func (dt *DeviceTokens) Load(db *Database) error {
 
 	tokenCount := 0
 	userTokenCounts := make(map[uint64]int)
+	uniqueUsers := make(map[uint64]bool)
 
 	for rows.Next() {
 		token := &DeviceToken{}
@@ -79,10 +81,14 @@ func (dt *DeviceTokens) Load(db *Database) error {
 		dt.userTokens[token.UserId] = append(dt.userTokens[token.UserId], token)
 		tokenCount++
 		userTokenCounts[token.UserId]++
+		uniqueUsers[token.UserId] = true
 	}
 
-	// Log token loading summary
-	fmt.Printf("DeviceTokens.Load: loaded %d total device tokens\n", tokenCount)
+	// Log token loading summary with more detail
+	fmt.Printf("DeviceTokens.Load: loaded %d total device tokens for %d users\n", tokenCount, len(uniqueUsers))
+	if tokenCount == 0 {
+		fmt.Printf("DeviceTokens.Load: WARNING - No device tokens found in database. This is normal for new installations or if all users have unregistered their devices.\n")
+	}
 	for userId, count := range userTokenCounts {
 		if count > 1 {
 			fmt.Printf("DeviceTokens.Load: user %d has %d device tokens\n", userId, count)
@@ -146,6 +152,14 @@ func (dt *DeviceTokens) Delete(id uint64, db *Database) error {
 	if !exists {
 		return fmt.Errorf("device token not found")
 	}
+
+	// Log deletion with truncated token for security
+	truncatedToken := token.Token
+	if len(truncatedToken) > 10 {
+		truncatedToken = truncatedToken[:10] + "..."
+	}
+	log.Printf("DeviceTokens.Delete: removing device token ID %d for user %d (token: %s, platform: %s)", 
+		id, token.UserId, truncatedToken, token.Platform)
 
 	_, err := db.Sql.Exec(`DELETE FROM "deviceTokens" WHERE "deviceTokenId" = $1`, id)
 	if err != nil {
