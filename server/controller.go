@@ -1871,8 +1871,11 @@ func (controller *Controller) queueTranscriptionIfNeeded(call *Call) {
 	reasons := []string{}
 
 	// Check minimum call duration if configured
+	// EXCEPTION: Tone-enabled talkgroups bypass this check if they have > 2s after tone removal
 	// Do this check asynchronously to avoid blocking the worker
 	minDuration := controller.Options.TranscriptionConfig.MinCallDuration
+	toneDetectionEnabled := call.Talkgroup != nil && call.Talkgroup.ToneDetectionEnabled
+
 	if minDuration > 0 {
 		// Check duration in a separate goroutine to avoid blocking
 		go func() {
@@ -1882,13 +1885,9 @@ func (controller *Controller) queueTranscriptionIfNeeded(call *Call) {
 				controller.Logs.LogEvent(LogLevelWarn, fmt.Sprintf("ffprobe failed for call %d (will skip transcription): %v", call.Id, err))
 				return
 			}
-			if audioDuration < minDuration {
-				controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("skipping transcription for call %d: duration %.1fs is less than minimum %.1fs", call.Id, audioDuration, minDuration))
-				return
-			}
 
-			// NEW: Check if audio is mostly tones (would result in very short remaining audio after tone removal)
-			if call.HasTones && call.ToneSequence != nil && len(call.ToneSequence.Tones) > 0 {
+			// For tone-enabled talkgroups, check remaining audio after tone removal instead of total duration
+			if toneDetectionEnabled && call.HasTones && call.ToneSequence != nil && len(call.ToneSequence.Tones) > 0 {
 				// Calculate total tone duration
 				toneDuration := 0.0
 				for _, tone := range call.ToneSequence.Tones {
@@ -1897,23 +1896,45 @@ func (controller *Controller) queueTranscriptionIfNeeded(call *Call) {
 
 				// Calculate remaining audio duration after tones would be removed
 				remainingDuration := audioDuration - toneDuration
-				const minRemainingDuration = 2.0 // Same threshold as in transcription_queue worker
+				const minRemainingDuration = 2.0
 
-				// EXCEPTION: If talkgroup has tone detection enabled, transcribe even short clips after tone removal
-				// These are likely important dispatch messages that should be transcribed regardless of length
-				toneDetectionEnabled := call.Talkgroup != nil && call.Talkgroup.ToneDetectionEnabled
-
-				if remainingDuration < minRemainingDuration && !toneDetectionEnabled {
+				if remainingDuration < minRemainingDuration {
 					controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("skipping transcription for call %d: remaining audio after tone removal (%.1fs) is less than minimum (%.1fs) - likely tone-only", call.Id, remainingDuration, minRemainingDuration))
 					// Mark as completed so pending tones don't wait forever
 					updateQuery := fmt.Sprintf(`UPDATE "calls" SET "transcriptionStatus" = 'completed' WHERE "callId" = %d`, call.Id)
 					controller.Database.Sql.Exec(updateQuery)
 					return
-				} else if remainingDuration < minRemainingDuration && toneDetectionEnabled {
-					controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("call %d has short remaining audio (%.1fs < %.1fs), but tone detection is enabled - transcribing anyway", call.Id, remainingDuration, minRemainingDuration))
-				} else {
-					controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("call %d has sufficient remaining audio after tone removal (%.1fs of %.1fs total, %.1fs tones)", call.Id, remainingDuration, audioDuration, toneDuration))
 				}
+
+				controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("call %d on tone-enabled talkgroup: bypassing global minimum duration (%.1fs < %.1fs), using remaining audio check (%.1fs remaining after %.1fs tones)", call.Id, audioDuration, minDuration, remainingDuration, toneDuration))
+				// Continue to alert checks below (bypassed global minimum)
+			} else if audioDuration < minDuration {
+				// Normal check for non-tone-enabled talkgroups or calls without tones
+				controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("skipping transcription for call %d: duration %.1fs is less than minimum %.1fs", call.Id, audioDuration, minDuration))
+				return
+			}
+
+			// NEW: Check if audio is mostly tones (would result in very short remaining audio after tone removal)
+			// This applies to calls with tones but NOT on tone-enabled talkgroups (already handled above)
+			if !toneDetectionEnabled && call.HasTones && call.ToneSequence != nil && len(call.ToneSequence.Tones) > 0 {
+				// Calculate total tone duration
+				toneDuration := 0.0
+				for _, tone := range call.ToneSequence.Tones {
+					toneDuration += tone.Duration
+				}
+
+				// Calculate remaining audio duration after tones would be removed
+				remainingDuration := audioDuration - toneDuration
+				const minRemainingDuration = 2.0
+
+				if remainingDuration < minRemainingDuration {
+					controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("skipping transcription for call %d: remaining audio after tone removal (%.1fs) is less than minimum (%.1fs) - likely tone-only", call.Id, remainingDuration, minRemainingDuration))
+					// Mark as completed so pending tones don't wait forever
+					updateQuery := fmt.Sprintf(`UPDATE "calls" SET "transcriptionStatus" = 'completed' WHERE "callId" = %d`, call.Id)
+					controller.Database.Sql.Exec(updateQuery)
+					return
+				}
+				controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("call %d has sufficient remaining audio after tone removal (%.1fs of %.1fs total, %.1fs tones)", call.Id, remainingDuration, audioDuration, toneDuration))
 			}
 
 			// Duration check passed, now check if any user has alerts enabled
