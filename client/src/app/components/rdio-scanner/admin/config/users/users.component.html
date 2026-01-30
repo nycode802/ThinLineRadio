@@ -425,6 +425,36 @@
                     <span class="value">{{ user.subscriptionStatus }}</span>
                 </div>
 
+                <div class="detail-row" *ngIf="user.fcmTokens && user.fcmTokens.length > 0">
+                    <span class="label">FCM Tokens ({{ user.fcmTokens.length }}):</span>
+                    <div class="value">
+                        <mat-list dense>
+                            <mat-list-item *ngFor="let token of user.fcmTokens" style="height: auto; padding: 8px 0;">
+                                <div style="display: flex; flex-direction: column; width: 100%;">
+                                    <div style="display: flex; align-items: center; margin-bottom: 4px;">
+                                        <mat-icon style="font-size: 16px; width: 16px; height: 16px; margin-right: 8px;" 
+                                                  [color]="token.platform === 'ios' ? 'primary' : 'accent'">
+                                            {{ token.platform === 'ios' ? 'phone_iphone' : 'phone_android' }}
+                                        </mat-icon>
+                                        <mat-chip style="font-size: 11px; min-height: 24px;">
+                                            {{ token.platform | uppercase }} - {{ token.pushType }}
+                                        </mat-chip>
+                                        <mat-chip style="font-size: 11px; min-height: 24px; margin-left: 4px;">
+                                            {{ token.sound || 'default' }}
+                                        </mat-chip>
+                                    </div>
+                                    <code style="font-size: 11px; background: #f5f5f5; padding: 4px 8px; border-radius: 4px; display: block; word-break: break-all; color: #333;">
+                                        {{ token.fcmToken }}
+                                    </code>
+                                    <div style="font-size: 11px; color: #666; margin-top: 4px;">
+                                        Created: {{ token.createdAt }} | Last Used: {{ token.lastUsed }}
+                                    </div>
+                                </div>
+                            </mat-list-item>
+                        </mat-list>
+                    </div>
+                </div>
+
                 <div class="actions" *ngIf="!editingUser || editingUser.id !== user.id">
                     <button type="button" mat-button color="accent" 
                             (click)="startEdit(user)">

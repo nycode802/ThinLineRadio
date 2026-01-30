@@ -4559,6 +4559,24 @@ func (admin *Admin) UsersListHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		// Get device tokens (FCM) for this user
+		deviceTokens := admin.Controller.DeviceTokens.GetByUser(user.Id)
+		var fcmTokens []map[string]interface{}
+		for _, dt := range deviceTokens {
+			// Only include tokens that have FCM tokens
+			if dt.FCMToken != "" {
+				fcmTokens = append(fcmTokens, map[string]interface{}{
+					"id":         dt.Id,
+					"fcmToken":   dt.FCMToken,
+					"pushType":   dt.PushType,
+					"platform":   dt.Platform,
+					"sound":      dt.Sound,
+					"createdAt":  time.Unix(dt.CreatedAt, 0).Format("2006-01-02 15:04:05 MST"),
+					"lastUsed":   time.Unix(dt.LastUsed, 0).Format("2006-01-02 15:04:05 MST"),
+				})
+			}
+		}
+
 		userList = append(userList, map[string]interface{}{
 			"id":                       user.Id,
 			"email":                    user.Email,
@@ -4583,6 +4601,7 @@ func (admin *Admin) UsersListHandler(w http.ResponseWriter, r *http.Request) {
 			"stripeCustomerId":         user.StripeCustomerId,
 			"stripeSubscriptionId":     user.StripeSubscriptionId,
 			"subscriptionStatus":       user.SubscriptionStatus,
+			"fcmTokens":                fcmTokens,
 		})
 	}
 

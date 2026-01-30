@@ -51,7 +51,7 @@
   - This violated the foreign key constraint requiring `createdBy` to reference a valid user or be NULL
   - Fix: Changed `createdBy` value from 0 to NULL for system-generated alerts
   - Error message: `ERROR: insert or update on table "systemAlerts" violates foreign key constraint "systemAlerts_createdBy_fkey" (SQLSTATE 23503)`
-  - Files modified: server/system_alert.go
+  - Files modified: server/system_alert.goR
 
 ### New Features
 
