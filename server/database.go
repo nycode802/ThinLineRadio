@@ -295,6 +295,11 @@ func (db *Database) migrate() error {
 		return formatError(err, "")
 	}
 
+	// Remove CASCADE DELETE from userAlertPreferences (Beta 9.2)
+	if err := migrateRemoveUserAlertPreferencesCascadeDelete(db); err != nil {
+		return formatError(err, "")
+	}
+
 	return nil
 }
 

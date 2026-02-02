@@ -1,5 +1,30 @@
 # Change log
 
+## Version 7.0 Beta 9.3 - Released TBD
+
+### Bug Fixes
+
+- **CRITICAL: Fixed bug where user alert preferences and FCM tokens were being cleared on config save**
+  - Root cause #1: Database CASCADE DELETE constraints on `userAlertPreferences.userId` and `deviceTokens.userId` automatically deleted data when users were updated
+  - Root cause #2: Migration in beta 9.2 only dropped constraints but didn't recreate them without CASCADE DELETE
+  - When saving config, user records are updated, triggering CASCADE DELETE of all related alert preferences and FCM tokens
+  - Database fix: Migration now properly recreates foreign key constraints WITHOUT CASCADE DELETE (defaults to NO ACTION)
+  - Updated migration function `migrateRemoveUserAlertPreferencesCascadeDelete` to drop AND recreate constraints
+  - Database constraints now prevent automatic deletion when parent records are updated
+  - User alert preferences and FCM tokens now persist across all config save operations
+  - Files modified: server/migrations.go
+
+- **Fixed keyword list IDs becoming orphaned when deleting keyword lists or importing from Radio Reference**
+  - Root cause #1: When deleting keyword lists via API, references in `userAlertPreferences.keywordListIds` JSON arrays weren't being cleaned up
+  - Root cause #2: Radio Reference imports were deleting ALL keyword lists and recreating them with new auto-incremented IDs
+  - Keyword lists are user-defined and have nothing to do with Radio Reference data, yet they were being wiped on every RR import
+  - Migration `migrateFixKeywordListIds` would fix orphaned IDs on startup, but problems would recur after deletions or RR imports
+  - Fixed #1: DELETE endpoint now cleans up references in all user alert preferences before deleting keyword list
+  - Fixed #2: Radio Reference imports now skip keyword list processing entirely, preserving user's keyword lists and their IDs
+  - Only full backup/restore operations (which include `keywordListId` field) will replace keyword lists with preserved IDs
+  - Orphaned keyword list IDs no longer occur from deletions or Radio Reference imports
+  - Files modified: server/api.go, server/admin.go
+
 ## Version 7.0 Beta 9.2 - Released TBD
 
 ### Enhancements
@@ -18,6 +43,15 @@
   - Files modified: server/api.go, server/admin.go
 
 ### Bug Fixes
+
+- **CRITICAL: Fixed bug where importing sites/talkgroups from Radio Reference would wipe out all user alert preferences (INCOMPLETE FIX - see beta 9.3)**
+  - Root cause: Database CASCADE DELETE constraints on `userAlertPreferences` table automatically deleted preferences when talkgroups were updated/deleted
+  - When talkgroups are written to database, old ones are deleted and recreated, triggering CASCADE DELETE of all related user preferences
+  - Database fix: Attempted to remove CASCADE DELETE foreign key constraints from `userAlertPreferences.systemId` and `userAlertPreferences.talkgroupId`
+  - Client-side fix: Excluded `userAlertPreferences` and `deviceTokens` from regular config saves (only included in full imports)
+  - Server-side fix: User alert preferences and device tokens are now only deleted/reimported during explicit full configuration imports
+  - **NOTE: Migration was incomplete - only dropped constraints but didn't recreate them. Fixed properly in beta 9.3**
+  - Files modified: server/postgresql.go, server/migrations.go, server/database.go, server/admin.go, client/src/app/components/rdio-scanner/admin/config/config.component.ts
 
 - **Fixed system alerts not clearing on first click (GitHub issue #96)**
   - Root cause: Frontend was using POST method but backend expected PUT for RESTful compliance

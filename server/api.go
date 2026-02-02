@@ -286,7 +286,7 @@ func (api *Api) HandleCall(key string, call *Call, w http.ResponseWriter) {
 			// Store API key ID in call metadata for preferred API key logic
 			apikeyId := apikey.Id
 			call.ApiKeyId = &apikeyId
-			
+
 			// Ensure site information is properly resolved before ingestion
 			if call != nil && call.SiteRef == "" && call.Meta.SiteRef != "" {
 				// Try to resolve by siteRef first
@@ -3012,7 +3012,7 @@ func (api *Api) TranscriptsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	status = strings.TrimSpace(r.URL.Query().Get("status"))
-	
+
 	// Date range filtering
 	if df := r.URL.Query().Get("dateFrom"); df != "" {
 		if v, err := strconv.ParseInt(df, 10, 64); err == nil {
@@ -3024,7 +3024,7 @@ func (api *Api) TranscriptsHandler(w http.ResponseWriter, r *http.Request) {
 			dateTo = v
 		}
 	}
-	
+
 	// Search query (searches in transcript text)
 	search = strings.TrimSpace(r.URL.Query().Get("search"))
 
@@ -3541,6 +3541,48 @@ func (api *Api) KeywordListHandler(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"success": true}`))
 
 	case http.MethodDelete:
+		// First, remove references to this keyword list from all user alert preferences
+		prefsQuery := `SELECT "userAlertPreferenceId", "keywordListIds" FROM "userAlertPreferences" WHERE "keywordListIds" != '[]' AND "keywordListIds" != ''`
+		prefsRows, err := api.Controller.Database.Sql.Query(prefsQuery)
+		if err == nil {
+			defer prefsRows.Close()
+
+			for prefsRows.Next() {
+				var prefId uint64
+				var keywordListIdsJson string
+				if err := prefsRows.Scan(&prefId, &keywordListIdsJson); err != nil {
+					continue
+				}
+
+				var keywordListIds []uint64
+				if err := json.Unmarshal([]byte(keywordListIdsJson), &keywordListIds); err != nil {
+					continue
+				}
+
+				// Check if this preference references the keyword list being deleted
+				hasReference := false
+				newIds := make([]uint64, 0)
+				for _, id := range keywordListIds {
+					if id == listId {
+						hasReference = true
+						// Skip this ID (remove it from the list)
+					} else {
+						newIds = append(newIds, id)
+					}
+				}
+
+				// Update the preference if it referenced the deleted keyword list
+				if hasReference {
+					newIdsJson, _ := json.Marshal(newIds)
+					updateQuery := fmt.Sprintf(`UPDATE "userAlertPreferences" SET "keywordListIds" = '%s' WHERE "userAlertPreferenceId" = %d`, escapeQuotes(string(newIdsJson)), prefId)
+					if _, err := api.Controller.Database.Sql.Exec(updateQuery); err != nil {
+						log.Printf("Warning: failed to update user alert preference %d when deleting keyword list %d: %v", prefId, listId, err)
+					}
+				}
+			}
+		}
+
+		// Now delete the keyword list
 		query := fmt.Sprintf(`DELETE FROM "keywordLists" WHERE "keywordListId" = %d`, listId)
 		if _, err := api.Controller.Database.Sql.Exec(query); err != nil {
 			api.exitWithError(w, http.StatusInternalServerError, fmt.Sprintf("failed to delete keyword list: %v", err))
@@ -7735,11 +7777,11 @@ func (api *Api) UserDeviceTokenHandler(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		// Register or update device token
 		var request struct {
-			Token     string `json:"token"`      // OneSignal player ID (legacy) or device ID
-			FCMToken  string `json:"fcm_token"`  // Firebase Cloud Messaging token
-			PushType  string `json:"push_type"`  // "onesignal" or "fcm"
-			Platform  string `json:"platform"`   // "ios" or "android"
-			Sound     string `json:"sound"`      // Notification sound preference
+			Token    string `json:"token"`     // OneSignal player ID (legacy) or device ID
+			FCMToken string `json:"fcm_token"` // Firebase Cloud Messaging token
+			PushType string `json:"push_type"` // "onesignal" or "fcm"
+			Platform string `json:"platform"`  // "ios" or "android"
+			Sound    string `json:"sound"`     // Notification sound preference
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {

@@ -2263,6 +2263,40 @@ func migrateEnhancedDuplicateDetection(db *Database) error {
 	return nil
 }
 
+// migrateRemoveUserAlertPreferencesCascadeDelete removes CASCADE DELETE from userAlertPreferences and deviceTokens foreign keys
+// This prevents user alert preferences and FCM tokens from being deleted when related records are updated
+func migrateRemoveUserAlertPreferencesCascadeDelete(db *Database) error {
+	log.Println("migrating user alert preferences and device tokens to remove CASCADE DELETE...")
+
+	// Drop and recreate userAlertPreferences foreign key constraints WITHOUT CASCADE DELETE
+	queries := []string{
+		`ALTER TABLE "userAlertPreferences" DROP CONSTRAINT IF EXISTS "userAlertPreferences_userId_fkey"`,
+		`ALTER TABLE "userAlertPreferences" ADD CONSTRAINT "userAlertPreferences_userId_fkey" FOREIGN KEY ("userId") REFERENCES "users"("userId")`,
+	}
+
+	for _, query := range queries {
+		if _, err := db.Sql.Exec(query); err != nil {
+			log.Printf("migration note (userAlertPreferences userId): %v", err)
+		}
+	}
+
+	// Drop and recreate deviceTokens foreign key constraint WITHOUT CASCADE DELETE
+	queries = []string{
+		`ALTER TABLE "deviceTokens" DROP CONSTRAINT IF EXISTS "deviceTokens_userId_fkey"`,
+		`ALTER TABLE "deviceTokens" ADD CONSTRAINT "deviceTokens_userId_fkey" FOREIGN KEY ("userId") REFERENCES "users"("userId")`,
+	}
+
+	for _, query := range queries {
+		if _, err := db.Sql.Exec(query); err != nil {
+			log.Printf("migration note (deviceTokens userId): %v", err)
+		}
+	}
+
+	log.Println("user alert preferences and device tokens CASCADE DELETE constraints removed successfully")
+
+	return nil
+}
+
 // migrateSystemHealthAlertOptions adds default values for system health alert settings
 // These options were added in Beta 8/9 but never had a migration to initialize them
 func migrateSystemHealthAlertOptions(db *Database) error {

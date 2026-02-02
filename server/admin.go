@@ -1681,38 +1681,123 @@ func (admin *Admin) ConfigHandler(w http.ResponseWriter, r *http.Request) {
 			}
 
 			// Handle keyword lists import
+			// NOTE: Keyword lists are user-defined and NOT part of Radio Reference data
+			// DO NOT delete/reimport keyword lists during Radio Reference imports - this preserves user's keyword lists and their IDs
 			switch v := m["keywordLists"].(type) {
 			case []any:
-				// Only delete ALL existing keyword lists for full imports, not regular saves
-				if isFullImport {
-					// Delete ALL existing keyword lists first to ensure a clean import
-					_, err := admin.Controller.Database.Sql.Exec(`DELETE FROM "keywordLists"`)
-					if err != nil {
-						logError(fmt.Errorf("failed to delete existing keyword lists during import: %v", err))
+				// Only import keyword lists during explicit full configuration backup/restore (not Radio Reference imports)
+				// Skip keyword list import entirely if this appears to be a Radio Reference import
+				if isFullImport && len(v) > 0 {
+					// Detect if this is a backup restore vs Radio Reference import
+					// Backup restores will have keywordListId field to preserve IDs
+					isBackupRestore := false
+					if firstList, ok := v[0].(map[string]any); ok {
+						if _, hasId := firstList["keywordListId"]; hasId {
+							isBackupRestore = true
+						}
 					}
 
-					// Import all keyword lists
-					for _, listData := range v {
-						listMap, ok := listData.(map[string]any)
+					// Only process keyword lists for full backup restores, NOT Radio Reference imports
+					if isBackupRestore {
+						// Delete existing keyword lists for backup restore
+						_, err := admin.Controller.Database.Sql.Exec(`DELETE FROM "keywordLists"`)
+						if err != nil {
+							logError(fmt.Errorf("failed to delete existing keyword lists during backup restore: %v", err))
+						}
+
+						// Import keyword lists with preserved IDs
+						for _, listData := range v {
+							listMap, ok := listData.(map[string]any)
+							if !ok {
+								continue
+							}
+
+							label, _ := listMap["label"].(string)
+							if label == "" {
+								continue
+							}
+
+							keywordListId := uint64(getFloat64FromMap(listMap, "keywordListId"))
+							description := getStringFromMap(listMap, "description")
+							order := uint(getFloat64FromMap(listMap, "order"))
+							createdAt := int64(getFloat64FromMap(listMap, "createdAt"))
+							if createdAt == 0 {
+								createdAt = time.Now().UnixMilli()
+							}
+
+							// Get keywords array
+							var keywords []string
+							if keywordsData, ok := listMap["keywords"].([]any); ok {
+								for _, kw := range keywordsData {
+									if k, ok := kw.(string); ok {
+										keywords = append(keywords, k)
+									}
+								}
+							}
+
+							keywordsJson, _ := json.Marshal(keywords)
+
+							// Insert keyword list with preserved ID
+							if admin.Controller.Database.Config.DbType == DbTypePostgresql {
+								query := `INSERT INTO "keywordLists" ("keywordListId", "label", "description", "keywords", "order", "createdAt") VALUES ($1, $2, $3, $4, $5, $6)`
+								if _, err := admin.Controller.Database.Sql.Exec(query, keywordListId, label, description, string(keywordsJson), order, createdAt); err != nil {
+									logError(fmt.Errorf("failed to import keyword list %s with ID %d: %v", label, keywordListId, err))
+								}
+							} else {
+								query := `INSERT INTO "keywordLists" ("keywordListId", "label", "description", "keywords", "order", "createdAt") VALUES (?, ?, ?, ?, ?, ?)`
+								if _, err := admin.Controller.Database.Sql.Exec(query, keywordListId, label, description, string(keywordsJson), order, createdAt); err != nil {
+									logError(fmt.Errorf("failed to import keyword list %s with ID %d: %v", label, keywordListId, err))
+								}
+							}
+						}
+					}
+					// Radio Reference imports (without keywordListId) will skip keyword list processing entirely
+				}
+			}
+
+			// Handle user alert preferences import (map imported userId -> actual userId)
+			// ONLY delete and re-import if this is a full import, not a regular config save
+			if isFullImport {
+				switch v := m["userAlertPreferences"].(type) {
+				case []any:
+					// Delete ALL existing user alert preferences first (only during full import)
+					_, err := admin.Controller.Database.Sql.Exec(`DELETE FROM "userAlertPreferences"`)
+					if err != nil {
+						logError(fmt.Errorf("failed to delete existing user alert preferences during import: %v", err))
+					}
+
+					// Import all user alert preferences
+					for _, prefData := range v {
+						prefMap, ok := prefData.(map[string]any)
 						if !ok {
 							continue
 						}
 
-						label, _ := listMap["label"].(string)
-						if label == "" {
+						importedUserId := uint64(getFloat64FromMap(prefMap, "userId"))
+						systemId := uint64(getFloat64FromMap(prefMap, "systemId"))
+						talkgroupId := uint64(getFloat64FromMap(prefMap, "talkgroupId"))
+
+						// Skip if essential fields are missing
+						if importedUserId == 0 || systemId == 0 || talkgroupId == 0 {
 							continue
 						}
 
-						description := getStringFromMap(listMap, "description")
-						order := uint(getFloat64FromMap(listMap, "order"))
-						createdAt := int64(getFloat64FromMap(listMap, "createdAt"))
-						if createdAt == 0 {
-							createdAt = time.Now().UnixMilli()
+						actualUserId := importedUserId
+						if mappedId, ok := userIdMap[importedUserId]; ok {
+							actualUserId = mappedId
 						}
+
+						if admin.Controller.Users.GetUserById(actualUserId) == nil {
+							continue
+						}
+
+						alertEnabled := getBoolFromMap(prefMap, "alertEnabled", false)
+						toneAlerts := getBoolFromMap(prefMap, "toneAlerts", true)
+						keywordAlerts := getBoolFromMap(prefMap, "keywordAlerts", true)
 
 						// Get keywords array
 						var keywords []string
-						if keywordsData, ok := listMap["keywords"].([]any); ok {
+						if keywordsData, ok := prefMap["keywords"].([]any); ok {
 							for _, kw := range keywordsData {
 								if k, ok := kw.(string); ok {
 									keywords = append(keywords, k)
@@ -1720,181 +1805,115 @@ func (admin *Admin) ConfigHandler(w http.ResponseWriter, r *http.Request) {
 							}
 						}
 
-						keywordsJson, _ := json.Marshal(keywords)
+						// Get keywordListIds array
+						var keywordListIds []int
+						if keywordListIdsData, ok := prefMap["keywordListIds"].([]any); ok {
+							for _, kid := range keywordListIdsData {
+								if k, ok := kid.(float64); ok {
+									keywordListIds = append(keywordListIds, int(k))
+								}
+							}
+						}
 
-						// Insert keyword list using parameterized queries
+						// Get toneSetIds array
+						var toneSetIds []string
+						if toneSetIdsData, ok := prefMap["toneSetIds"].([]any); ok {
+							for _, tid := range toneSetIdsData {
+								if t, ok := tid.(string); ok {
+									toneSetIds = append(toneSetIds, t)
+								}
+							}
+						}
+
+						keywordsJson, _ := json.Marshal(keywords)
+						keywordListIdsJson, _ := json.Marshal(keywordListIds)
+						toneSetIdsJson, _ := json.Marshal(toneSetIds)
+
+						// Insert user alert preference using parameterized queries
 						if admin.Controller.Database.Config.DbType == DbTypePostgresql {
-							query := `INSERT INTO "keywordLists" ("label", "description", "keywords", "order", "createdAt") VALUES ($1, $2, $3, $4, $5) RETURNING "keywordListId"`
-							var listId uint64
-							if err := admin.Controller.Database.Sql.QueryRow(query, label, description, string(keywordsJson), order, createdAt).Scan(&listId); err != nil {
-								logError(fmt.Errorf("failed to import keyword list %s: %v", label, err))
+							query := `INSERT INTO "userAlertPreferences" ("userId", "systemId", "talkgroupId", "alertEnabled", "toneAlerts", "keywordAlerts", "keywords", "keywordListIds", "toneSetIds") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`
+							if _, err := admin.Controller.Database.Sql.Exec(query, actualUserId, systemId, talkgroupId, alertEnabled, toneAlerts, keywordAlerts, string(keywordsJson), string(keywordListIdsJson), string(toneSetIdsJson)); err != nil {
+								logError(fmt.Errorf("failed to import user alert preference for userId=%d (mapped from %d), systemId=%d, talkgroupId=%d: %v", actualUserId, importedUserId, systemId, talkgroupId, err))
 							}
 						} else {
-							query := `INSERT INTO "keywordLists" ("label", "description", "keywords", "order", "createdAt") VALUES (?, ?, ?, ?, ?)`
-							if _, err := admin.Controller.Database.Sql.Exec(query, label, description, string(keywordsJson), order, createdAt); err != nil {
-								logError(fmt.Errorf("failed to import keyword list %s: %v", label, err))
+							query := `INSERT INTO "userAlertPreferences" ("userId", "systemId", "talkgroupId", "alertEnabled", "toneAlerts", "keywordAlerts", "keywords", "keywordListIds", "toneSetIds") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+							if _, err := admin.Controller.Database.Sql.Exec(query, actualUserId, systemId, talkgroupId, alertEnabled, toneAlerts, keywordAlerts, string(keywordsJson), string(keywordListIdsJson), string(toneSetIdsJson)); err != nil {
+								logError(fmt.Errorf("failed to import user alert preference for userId=%d (mapped from %d), systemId=%d, talkgroupId=%d: %v", actualUserId, importedUserId, systemId, talkgroupId, err))
 							}
 						}
 					}
 				}
-			}
 
-			// Handle user alert preferences import (map imported userId -> actual userId)
-			switch v := m["userAlertPreferences"].(type) {
-			case []any:
-				// Delete ALL existing user alert preferences first
-				_, err := admin.Controller.Database.Sql.Exec(`DELETE FROM "userAlertPreferences"`)
-				if err != nil {
-					logError(fmt.Errorf("failed to delete existing user alert preferences during import: %v", err))
-				}
-
-				// Import all user alert preferences
-				for _, prefData := range v {
-					prefMap, ok := prefData.(map[string]any)
-					if !ok {
-						continue
+				// Handle device tokens import (map imported userId -> actual userId)
+				switch v := m["deviceTokens"].(type) {
+				case []any:
+					// Delete ALL existing device tokens first (only during full import)
+					_, err := admin.Controller.Database.Sql.Exec(`DELETE FROM "deviceTokens"`)
+					if err != nil {
+						logError(fmt.Errorf("failed to delete existing device tokens during import: %v", err))
 					}
 
-					importedUserId := uint64(getFloat64FromMap(prefMap, "userId"))
-					systemId := uint64(getFloat64FromMap(prefMap, "systemId"))
-					talkgroupId := uint64(getFloat64FromMap(prefMap, "talkgroupId"))
+					for _, tokenData := range v {
+						tokenMap, ok := tokenData.(map[string]any)
+						if !ok {
+							continue
+						}
 
-					// Skip if essential fields are missing
-					if importedUserId == 0 || systemId == 0 || talkgroupId == 0 {
-						continue
-					}
+						importedUserId := uint64(getFloat64FromMap(tokenMap, "userId"))
+						token := getStringFromMap(tokenMap, "token")
+						if importedUserId == 0 || token == "" {
+							continue
+						}
 
-					actualUserId := importedUserId
-					if mappedId, ok := userIdMap[importedUserId]; ok {
-						actualUserId = mappedId
-					}
+						actualUserId := importedUserId
+						if mappedId, ok := userIdMap[importedUserId]; ok {
+							actualUserId = mappedId
+						}
+						if admin.Controller.Users.GetUserById(actualUserId) == nil {
+							continue
+						}
 
-					if admin.Controller.Users.GetUserById(actualUserId) == nil {
-						continue
-					}
+						platform := getStringFromMap(tokenMap, "platform")
+						sound := getStringFromMap(tokenMap, "sound")
+						createdAt := int64(getFloat64FromMap(tokenMap, "createdAt"))
+						lastUsed := int64(getFloat64FromMap(tokenMap, "lastUsed"))
+						if createdAt == 0 {
+							createdAt = time.Now().Unix()
+						}
+						if lastUsed == 0 {
+							lastUsed = createdAt
+						}
 
-					alertEnabled := getBoolFromMap(prefMap, "alertEnabled", false)
-					toneAlerts := getBoolFromMap(prefMap, "toneAlerts", true)
-					keywordAlerts := getBoolFromMap(prefMap, "keywordAlerts", true)
-
-					// Get keywords array
-					var keywords []string
-					if keywordsData, ok := prefMap["keywords"].([]any); ok {
-						for _, kw := range keywordsData {
-							if k, ok := kw.(string); ok {
-								keywords = append(keywords, k)
+						if admin.Controller.Database.Config.DbType == DbTypePostgresql {
+							query := `INSERT INTO "deviceTokens" ("userId", "token", "platform", "sound", "createdAt", "lastUsed") VALUES ($1, $2, $3, $4, $5, $6)`
+							if _, err := admin.Controller.Database.Sql.Exec(query, actualUserId, token, platform, sound, createdAt, lastUsed); err != nil {
+								logError(fmt.Errorf("failed to import device token for userId=%d (mapped from %d): %v", actualUserId, importedUserId, err))
+							}
+						} else {
+							query := `INSERT INTO "deviceTokens" ("userId", "token", "platform", "sound", "createdAt", "lastUsed") VALUES (?, ?, ?, ?, ?, ?)`
+							if _, err := admin.Controller.Database.Sql.Exec(query, actualUserId, token, platform, sound, createdAt, lastUsed); err != nil {
+								logError(fmt.Errorf("failed to import device token for userId=%d (mapped from %d): %v", actualUserId, importedUserId, err))
 							}
 						}
 					}
 
-					// Get keywordListIds array
-					var keywordListIds []int
-					if keywordListIdsData, ok := prefMap["keywordListIds"].([]any); ok {
-						for _, kid := range keywordListIdsData {
-							if k, ok := kid.(float64); ok {
-								keywordListIds = append(keywordListIds, int(k))
+					// Reload device tokens into memory
+					admin.Controller.DeviceTokens.mutex.Lock()
+					admin.Controller.DeviceTokens.tokens = make(map[uint64]*DeviceToken)
+					query := `SELECT "deviceTokenId", "userId", "token", "platform", "sound", "createdAt", "lastUsed" FROM "deviceTokens"`
+					rows, err := admin.Controller.Database.Sql.Query(query)
+					if err == nil {
+						defer rows.Close()
+						for rows.Next() {
+							var dt DeviceToken
+							if err := rows.Scan(&dt.Id, &dt.UserId, &dt.Token, &dt.Platform, &dt.Sound, &dt.CreatedAt, &dt.LastUsed); err == nil {
+								admin.Controller.DeviceTokens.tokens[dt.Id] = &dt
 							}
 						}
 					}
-
-					// Get toneSetIds array
-					var toneSetIds []string
-					if toneSetIdsData, ok := prefMap["toneSetIds"].([]any); ok {
-						for _, tid := range toneSetIdsData {
-							if t, ok := tid.(string); ok {
-								toneSetIds = append(toneSetIds, t)
-							}
-						}
-					}
-
-					keywordsJson, _ := json.Marshal(keywords)
-					keywordListIdsJson, _ := json.Marshal(keywordListIds)
-					toneSetIdsJson, _ := json.Marshal(toneSetIds)
-
-					// Insert user alert preference using parameterized queries
-					if admin.Controller.Database.Config.DbType == DbTypePostgresql {
-						query := `INSERT INTO "userAlertPreferences" ("userId", "systemId", "talkgroupId", "alertEnabled", "toneAlerts", "keywordAlerts", "keywords", "keywordListIds", "toneSetIds") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`
-						if _, err := admin.Controller.Database.Sql.Exec(query, actualUserId, systemId, talkgroupId, alertEnabled, toneAlerts, keywordAlerts, string(keywordsJson), string(keywordListIdsJson), string(toneSetIdsJson)); err != nil {
-							logError(fmt.Errorf("failed to import user alert preference for userId=%d (mapped from %d), systemId=%d, talkgroupId=%d: %v", actualUserId, importedUserId, systemId, talkgroupId, err))
-						}
-					} else {
-						query := `INSERT INTO "userAlertPreferences" ("userId", "systemId", "talkgroupId", "alertEnabled", "toneAlerts", "keywordAlerts", "keywords", "keywordListIds", "toneSetIds") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-						if _, err := admin.Controller.Database.Sql.Exec(query, actualUserId, systemId, talkgroupId, alertEnabled, toneAlerts, keywordAlerts, string(keywordsJson), string(keywordListIdsJson), string(toneSetIdsJson)); err != nil {
-							logError(fmt.Errorf("failed to import user alert preference for userId=%d (mapped from %d), systemId=%d, talkgroupId=%d: %v", actualUserId, importedUserId, systemId, talkgroupId, err))
-						}
-					}
+					admin.Controller.DeviceTokens.mutex.Unlock()
 				}
-			}
-
-			// Handle device tokens import (map imported userId -> actual userId)
-			switch v := m["deviceTokens"].(type) {
-			case []any:
-				// Delete ALL existing device tokens first
-				_, err := admin.Controller.Database.Sql.Exec(`DELETE FROM "deviceTokens"`)
-				if err != nil {
-					logError(fmt.Errorf("failed to delete existing device tokens during import: %v", err))
-				}
-
-				for _, tokenData := range v {
-					tokenMap, ok := tokenData.(map[string]any)
-					if !ok {
-						continue
-					}
-
-					importedUserId := uint64(getFloat64FromMap(tokenMap, "userId"))
-					token := getStringFromMap(tokenMap, "token")
-					if importedUserId == 0 || token == "" {
-						continue
-					}
-
-					actualUserId := importedUserId
-					if mappedId, ok := userIdMap[importedUserId]; ok {
-						actualUserId = mappedId
-					}
-					if admin.Controller.Users.GetUserById(actualUserId) == nil {
-						continue
-					}
-
-					platform := getStringFromMap(tokenMap, "platform")
-					sound := getStringFromMap(tokenMap, "sound")
-					createdAt := int64(getFloat64FromMap(tokenMap, "createdAt"))
-					lastUsed := int64(getFloat64FromMap(tokenMap, "lastUsed"))
-					if createdAt == 0 {
-						createdAt = time.Now().Unix()
-					}
-					if lastUsed == 0 {
-						lastUsed = createdAt
-					}
-
-					if admin.Controller.Database.Config.DbType == DbTypePostgresql {
-						query := `INSERT INTO "deviceTokens" ("userId", "token", "platform", "sound", "createdAt", "lastUsed") VALUES ($1, $2, $3, $4, $5, $6)`
-						if _, err := admin.Controller.Database.Sql.Exec(query, actualUserId, token, platform, sound, createdAt, lastUsed); err != nil {
-							logError(fmt.Errorf("failed to import device token for userId=%d (mapped from %d): %v", actualUserId, importedUserId, err))
-						}
-					} else {
-						query := `INSERT INTO "deviceTokens" ("userId", "token", "platform", "sound", "createdAt", "lastUsed") VALUES (?, ?, ?, ?, ?, ?)`
-						if _, err := admin.Controller.Database.Sql.Exec(query, actualUserId, token, platform, sound, createdAt, lastUsed); err != nil {
-							logError(fmt.Errorf("failed to import device token for userId=%d (mapped from %d): %v", actualUserId, importedUserId, err))
-						}
-					}
-				}
-
-				// Reload device tokens into memory
-				admin.Controller.DeviceTokens.mutex.Lock()
-				admin.Controller.DeviceTokens.tokens = make(map[uint64]*DeviceToken)
-				query := `SELECT "deviceTokenId", "userId", "token", "platform", "sound", "createdAt", "lastUsed" FROM "deviceTokens"`
-				rows, err := admin.Controller.Database.Sql.Query(query)
-				if err == nil {
-					defer rows.Close()
-					for rows.Next() {
-						var dt DeviceToken
-						if err := rows.Scan(&dt.Id, &dt.UserId, &dt.Token, &dt.Platform, &dt.Sound, &dt.CreatedAt, &dt.LastUsed); err == nil {
-							admin.Controller.DeviceTokens.tokens[dt.Id] = &dt
-						}
-					}
-				}
-				admin.Controller.DeviceTokens.mutex.Unlock()
-			}
+			} // End isFullImport check for userAlertPreferences and deviceTokens
 
 			// Emit config asynchronously to avoid blocking
 			go admin.Controller.EmitConfig()

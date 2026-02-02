@@ -223,7 +223,8 @@ export class RdioScannerAdminConfigComponent implements OnDestroy, OnInit {
 
         const formValue = this.form?.getRawValue();
         
-        // If NOT imported for review, exclude users, userGroups, and keywordLists (managed via dedicated endpoints)
+        // If NOT imported for review, exclude users, userGroups, keywordLists, userAlertPreferences, and deviceTokens
+        // These are managed via dedicated endpoints or should only be imported during full config imports
         // If imported for review, include them and do a full import
         const isFullImport = this.isImportedForReview;
         
@@ -231,6 +232,8 @@ export class RdioScannerAdminConfigComponent implements OnDestroy, OnInit {
             delete formValue.users;
             delete formValue.userGroups;
             delete formValue.keywordLists;
+            delete formValue.userAlertPreferences;
+            delete formValue.deviceTokens;
         }
         
         // Clear the import flag after save

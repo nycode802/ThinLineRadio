@@ -250,8 +250,6 @@ var PostgresqlSchema = []string{
     "keywordListIds" text NOT NULL DEFAULT '[]',
     "toneSetIds" text NOT NULL DEFAULT '[]',
     CONSTRAINT "userAlertPreferences_userId_fkey" FOREIGN KEY ("userId") REFERENCES "users" ("userId") ON DELETE CASCADE ON UPDATE CASCADE,
-    CONSTRAINT "userAlertPreferences_systemId_fkey" FOREIGN KEY ("systemId") REFERENCES "systems" ("systemId") ON DELETE CASCADE ON UPDATE CASCADE,
-    CONSTRAINT "userAlertPreferences_talkgroupId_fkey" FOREIGN KEY ("talkgroupId") REFERENCES "talkgroups" ("talkgroupId") ON DELETE CASCADE ON UPDATE CASCADE,
     UNIQUE ("userId", "systemId", "talkgroupId")
   );`,
 
