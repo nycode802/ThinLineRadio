@@ -52,3 +52,4 @@ whisper/
 
 #Package Lock for Node.js
 client/package-lock.json
+ThinLineRadioV7-config.json

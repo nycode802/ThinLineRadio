@@ -63,26 +63,28 @@ type CallUnit struct {
 }
 
 type Call struct {
-	Id            uint64
-	Audio         []byte
-	AudioFilename string
-	AudioMime     string
-	Delayed       bool
-	Frequencies   []CallFrequency
-	Frequency     uint
-	Meta          CallMeta
-	Patches       []uint
-	SiteRef       string // Site ID as string to preserve leading zeros
-	System        *System
-	Talkgroup     *Talkgroup
-	Timestamp     time.Time
-	Units         []CallUnit
-	ToneSequence  *ToneSequence
-	HasTones      bool
-	Transcript    string
+	Id                   uint64
+	Audio                []byte
+	AudioFilename        string
+	AudioMime            string
+	OriginalAudio        []byte // Original audio before Opus/AAC conversion (used for transcription)
+	OriginalAudioMime    string // Original audio MIME type
+	Delayed              bool
+	Frequencies          []CallFrequency
+	Frequency            uint
+	Meta                 CallMeta
+	Patches              []uint
+	SiteRef              string // Site ID as string to preserve leading zeros
+	System               *System
+	Talkgroup            *Talkgroup
+	Timestamp            time.Time
+	Units                []CallUnit
+	ToneSequence         *ToneSequence
+	HasTones             bool
+	Transcript           string
 	TranscriptConfidence float64
-	TranscriptionStatus string
-	ApiKeyId      *uint64 // API key used for upload (for preferred API key logic)
+	TranscriptionStatus  string
+	ApiKeyId             *uint64 // API key used for upload (for preferred API key logic)
 
 	// Add back simple fields for compatibility with v6 uploads
 	SystemId    uint `json:"system"`
@@ -298,9 +300,9 @@ func (calls *Calls) CheckDuplicateBySiteAndFrequency(call *Call, msTimeFrame uin
 	defer cancel()
 
 	// Get existing calls with site information
-	query := fmt.Sprintf(`SELECT "callId", "siteRef" FROM "calls" WHERE ("timestamp" BETWEEN %d and %d) AND "systemId" = %d AND "talkgroupId" = %d`, 
+	query := fmt.Sprintf(`SELECT "callId", "siteRef" FROM "calls" WHERE ("timestamp" BETWEEN %d and %d) AND "systemId" = %d AND "talkgroupId" = %d`,
 		from.UnixMilli(), to.UnixMilli(), call.System.Id, call.Talkgroup.Id)
-	
+
 	rows, err := db.Sql.QueryContext(ctx, query)
 	if err != nil {
 		return false, "", formatError(err, query)
@@ -312,7 +314,7 @@ func (calls *Calls) CheckDuplicateBySiteAndFrequency(call *Call, msTimeFrame uin
 	for rows.Next() {
 		var existingCallId uint64
 		var existingSiteRef sql.NullString
-		
+
 		if err := rows.Scan(&existingCallId, &existingSiteRef); err != nil {
 			continue
 		}
@@ -354,10 +356,10 @@ func (calls *Calls) CheckDuplicateBySiteAndFrequency(call *Call, msTimeFrame uin
 
 func (calls *Calls) GetCall(id uint64) (*Call, error) {
 	var (
-		err       error
-		query     string
-		rows      *sql.Rows
-		tx        *sql.Tx
+		err   error
+		query string
+		rows  *sql.Rows
+		tx    *sql.Tx
 
 		patch       string
 		systemId    uint64
@@ -394,7 +396,7 @@ func (calls *Calls) GetCall(id uint64) (*Call, error) {
 	var transcript sql.NullString
 	var transcriptConfidence sql.NullFloat64
 	var transcriptionStatus sql.NullString
-	
+
 	if err = tx.QueryRow(query).Scan(&call.Audio, &call.AudioFilename, &call.AudioMime, &call.SiteRef, &timestamp, &patch, &systemId, &talkgroupId, &frequency, &toneSequenceJson, &call.HasTones, &transcript, &transcriptConfidence, &transcriptionStatus); err != nil && err != sql.ErrNoRows {
 		tx.Rollback()
 		return nil, formatError(err, query)
@@ -667,7 +669,18 @@ func (calls *Calls) Search(searchOptions *CallsSearchOptions, client *Client) (*
 		// The sort order (ASC/DESC) controls whether oldest or newest are shown first
 		where = append(where, fmt.Sprintf(`c."timestamp" >= %d`, selectedDateMs))
 	default:
-		// No date selected - no time filter applied
+		// No date selected - for large databases, limit scan range when sorting DESC (newest first)
+		// This prevents full table scans on 50M+ record databases
+		// For DESC order (newest first), default to last 24 hours to optimize index usage
+		// For ASC order (oldest first), no default filter - let user see oldest calls
+		if order == descOrder {
+			now := time.Now()
+			// Default to 24 hours back for newest-first searches without a date
+			defaultLookback := now.Add(-24 * time.Hour)
+			defaultLookbackMs := defaultLookback.UnixMilli()
+			where = append(where, fmt.Sprintf(`c."timestamp" >= %d`, defaultLookbackMs))
+			calls.controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("Search: No date selected, applying default 24-hour lookback for DESC order (from %s)", defaultLookback.Format("2006-01-02 15:04:05")))
+		}
 	}
 
 	// Build final WHERE clause
@@ -705,7 +718,7 @@ func (calls *Calls) Search(searchOptions *CallsSearchOptions, client *Client) (*
 	// Query for limit+1 to determine if there are more results
 	queryLimit := limit + 1
 	query = fmt.Sprintf(`SELECT c."callId", c."timestamp", c."systemRef", c."talkgroupRef", c."frequency", c."siteRef", (SELECT cu."unitRef" FROM "callUnits" cu WHERE cu."callId" = c."callId" ORDER BY cu."offset" LIMIT 1) as "source" FROM "calls" AS c LEFT JOIN "delayed" AS d ON d."callId" = c."callId" %s ORDER BY c."timestamp" %s LIMIT %d OFFSET %d`, delayWhere, order, queryLimit, offset)
-	
+
 	calls.controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("Search RESULTS query: %s", query))
 
 	// Add timeout context to prevent indefinite blocking
@@ -727,7 +740,15 @@ func (calls *Calls) Search(searchOptions *CallsSearchOptions, client *Client) (*
 			break
 		}
 
+		// Convert timestamp - validate to prevent JSON marshaling errors
+		// JSON only supports years 0-9999, so skip calls with invalid timestamps
 		searchResult.Timestamp = time.UnixMilli(timestamp)
+		if searchResult.Timestamp.Year() < 1 || searchResult.Timestamp.Year() > 9999 {
+			// Skip this call - invalid timestamp that will cause JSON marshaling to fail
+			calls.controller.Logs.LogEvent(LogLevelWarn, fmt.Sprintf("Skipping call %d with invalid timestamp: %v (year %d out of range)", searchResult.Id, searchResult.Timestamp, searchResult.Timestamp.Year()))
+			continue
+		}
+
 		if frequency.Valid && frequency.Int64 > 0 {
 			searchResult.Frequency = uint(frequency.Int64)
 		}
@@ -754,7 +775,7 @@ func (calls *Calls) Search(searchOptions *CallsSearchOptions, client *Client) (*
 
 	// Set count to actual number of results returned (should be limit)
 	searchResults.Count = uint(len(searchResults.Results))
-	
+
 	// If we fetched more than 'limit' rows, there are more results available
 	searchResults.HasMore = totalCalls > int(limit)
 

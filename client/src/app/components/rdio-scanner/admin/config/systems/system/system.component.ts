@@ -263,15 +263,15 @@ export class RdioScannerAdminSystemComponent {
     blacklistTalkgroup(index: number): void {
         const talkgroup = this.talkgroups[index];
 
-        const id = talkgroup.value.id;
+        const talkgroupRef = talkgroup.value.talkgroupRef;
 
-        if (typeof id !== 'number') {
+        if (typeof talkgroupRef !== 'number') {
             return;
         }
 
         const blacklists = this.form.get('blacklists') as FormControl | null;
 
-        blacklists?.setValue(blacklists.value?.trim() ? `${blacklists.value},${id}` : `${id}`);
+        blacklists?.setValue(blacklists.value?.trim() ? `${blacklists.value},${talkgroupRef}` : `${talkgroupRef}`);
 
         this.removeTalkgroup(index);
     }
@@ -336,16 +336,29 @@ export class RdioScannerAdminSystemComponent {
     }
 
     // Bulk selection methods
-    toggleTalkgroupSelection(index: number): void {
-        if (this.selectedTalkgroupIndices.has(index)) {
-            this.selectedTalkgroupIndices.delete(index);
+    toggleTalkgroupSelection(paginatedIndex: number): void {
+        // Map paginated index to full array index
+        const fullIndex = this.getFullTalkgroupIndex(paginatedIndex);
+        if (fullIndex === -1) return;
+        
+        if (this.selectedTalkgroupIndices.has(fullIndex)) {
+            this.selectedTalkgroupIndices.delete(fullIndex);
         } else {
-            this.selectedTalkgroupIndices.add(index);
+            this.selectedTalkgroupIndices.add(fullIndex);
         }
     }
 
-    isTalkgroupSelected(index: number): boolean {
-        return this.selectedTalkgroupIndices.has(index);
+    isTalkgroupSelected(paginatedIndex: number): boolean {
+        const fullIndex = this.getFullTalkgroupIndex(paginatedIndex);
+        if (fullIndex === -1) return false;
+        return this.selectedTalkgroupIndices.has(fullIndex);
+    }
+
+    // Helper: Map paginated index to full talkgroups array index
+    private getFullTalkgroupIndex(paginatedIndex: number): number {
+        const talkgroup = this.paginatedTalkgroups[paginatedIndex];
+        if (!talkgroup) return -1;
+        return this.talkgroups.indexOf(talkgroup);
     }
 
     selectAllTalkgroups(): void {

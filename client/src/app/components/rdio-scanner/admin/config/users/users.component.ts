@@ -28,6 +28,16 @@ import { InviteUserDialogComponent, InvitationResultsDialogComponent, CreateUser
 import { TransferUserDialogComponent } from './transfer-user-dialog.component';
 import { RdioScannerAdminSystemsSelectComponent } from '../systems/select/select.component';
 
+export interface FCMToken {
+    id: number;
+    fcmToken: string;
+    pushType: string;
+    platform: string;
+    sound: string;
+    createdAt: string;
+    lastUsed: string;
+}
+
 export interface User {
     id: number;
     email: string;
@@ -52,6 +62,7 @@ export interface User {
     stripeCustomerId: string;
     stripeSubscriptionId: string;
     subscriptionStatus: string;
+    fcmTokens?: FCMToken[];
 }
 
 @Component({
@@ -848,6 +859,33 @@ export class RdioScannerAdminUsersComponent implements OnInit, OnDestroy, OnChan
             error: (error) => {
                 console.error('Failed to send test push:', error);
                 const message = error.error?.error || error.error?.message || 'Failed to send test push notification';
+                this.matSnackBar.open(message, 'Close', {
+                    duration: 5000,
+                    panelClass: ['error-snackbar']
+                });
+            }
+        });
+    }
+
+    deleteDeviceToken(userId: number, tokenId: number): void {
+        if (!confirm('Are you sure you want to delete this device token? The user will need to re-register their device.')) {
+            return;
+        }
+
+        this.saving = true;
+        this.http.delete(`/api/admin/users/${userId}/device-tokens/${tokenId}`, { headers: this.adminService.getAuthHeaders() }).subscribe({
+            next: () => {
+                this.saving = false;
+                this.matSnackBar.open('Device token deleted successfully', 'Close', {
+                    duration: 3000,
+                    panelClass: ['success-snackbar']
+                });
+                this.loadUsers(true); // Reload to update token list
+            },
+            error: (error) => {
+                this.saving = false;
+                console.error('Failed to delete device token:', error);
+                const message = error.error?.error || error.error?.message || 'Failed to delete device token';
                 this.matSnackBar.open(message, 'Close', {
                     duration: 5000,
                     panelClass: ['error-snackbar']

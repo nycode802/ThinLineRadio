@@ -812,10 +812,15 @@ func (controller *Controller) processCallAfterDuplicateCheck(call *Call) {
 		system = call.System
 	}
 
-	// Store original audio before encoding - tone detection needs raw/uncompressed audio
+	// Store original audio before encoding - tone detection and transcription need raw/uncompressed audio
+	// This avoids double lossy conversion (e.g., MP3 -> Opus -> WAV) which degrades quality
 	originalAudio := make([]byte, len(call.Audio))
 	copy(originalAudio, call.Audio)
 	originalAudioMime := call.AudioMime
+	
+	// Store original audio in call struct for transcription to use later
+	call.OriginalAudio = originalAudio
+	call.OriginalAudioMime = originalAudioMime
 
 	// Run tone detection BEFORE encoding to avoid Opus compression affecting tone detection
 	shouldDetectTones := call.Talkgroup != nil && call.Talkgroup.ToneDetectionEnabled && len(call.Talkgroup.ToneSets) > 0
@@ -2166,14 +2171,25 @@ func (controller *Controller) queueTranscriptionIfNeeded(call *Call) {
 func (controller *Controller) queueTranscriptionJobIfNeeded(call *Call, priority int, reasons []string) {
 	queue := controller.TranscriptionQueue
 	if queue != nil {
+		// Use original audio for transcription if available (avoids double lossy conversion)
+		// Falls back to converted audio if original is not available
+		audioToUse := call.Audio
+		mimeToUse := call.AudioMime
+		if len(call.OriginalAudio) > 0 && call.OriginalAudioMime != "" {
+			audioToUse = call.OriginalAudio
+			mimeToUse = call.OriginalAudioMime
+		}
+		
 		queue.QueueJob(TranscriptionJob{
-			CallId:      call.Id,
-			Audio:       call.Audio,
-			AudioMime:   call.AudioMime,
-			SystemId:    call.System.Id,
-			TalkgroupId: call.Talkgroup.Id,
-			Priority:    priority,
-			Reasons:     reasons,
+			CallId:        call.Id,
+			Audio:         call.Audio,              // Keep converted audio for backward compatibility
+			AudioMime:     call.AudioMime,
+			OriginalAudio: audioToUse,              // Preferred audio for transcription
+			OriginalMime:  mimeToUse,
+			SystemId:      call.System.Id,
+			TalkgroupId:   call.Talkgroup.Id,
+			Priority:      priority,
+			Reasons:       reasons,
 		})
 	} else {
 		controller.Logs.LogEvent(LogLevelWarn, fmt.Sprintf("transcription queue became unavailable while processing call %d", call.Id))
@@ -2345,6 +2361,9 @@ func (controller *Controller) ProcessMessageCommandListCall(client *Client, mess
 }
 
 func (controller *Controller) ProcessMessageCommandLivefeedMap(client *Client, message *Message) {
+	// Check if this is a livefeed stop (null/empty map)
+	wasAllOff := client.Livefeed.IsAllOff()
+	
 	client.Livefeed.FromMap(message.Payload)
 	msg := &Message{Command: MessageCommandLivefeedMap, Payload: !client.Livefeed.IsAllOff()}
 	select {
@@ -2352,9 +2371,23 @@ func (controller *Controller) ProcessMessageCommandLivefeedMap(client *Client, m
 	default:
 	}
 
-	// Send available calls to newly connected clients (as if there was no delay)
+	// Only send available calls on initial livefeed start (not on channel toggles)
+	// GitHub issue #93: Prevents backlog duplication when toggling channels
 	if !client.Livefeed.IsAllOff() {
-		go controller.sendAvailableCallsToClient(client)
+		// If livefeed was previously all off (initial start or resuming from stopped state)
+		if wasAllOff {
+			// Mark that we're starting fresh - backlog should be sent
+			client.BacklogSent = false
+		}
+		
+		// Only send backlog if we haven't sent it yet for this livefeed session
+		if !client.BacklogSent {
+			client.BacklogSent = true
+			go controller.sendAvailableCallsToClient(client)
+		}
+	} else {
+		// Livefeed turned off - reset flag so backlog will be sent on next start
+		client.BacklogSent = false
 	}
 }
 

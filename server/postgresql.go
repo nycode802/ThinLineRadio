@@ -123,6 +123,8 @@ var PostgresqlSchema = []string{
 	`CREATE INDEX IF NOT EXISTS "calls_refs_idx" ON "calls" ("systemRef","talkgroupRef","timestamp");`,
 	`CREATE INDEX IF NOT EXISTS "calls_tones_idx" ON "calls" ("hasTones","timestamp");`,
 	`CREATE INDEX IF NOT EXISTS "calls_transcript_idx" ON "calls" ("transcriptionStatus","timestamp");`,
+	// Standalone timestamp index for sorting/filtering without system/talkgroup filters
+	`CREATE INDEX IF NOT EXISTS "calls_timestamp_idx" ON "calls" ("timestamp" DESC);`,
 	`DROP TABLE IF EXISTS "callFrequencies";`,
 
 	`CREATE TABLE IF NOT EXISTS "callPatches" (
@@ -153,6 +155,9 @@ var PostgresqlSchema = []string{
     "timestamp" bigint NOT NULL,
     CONSTRAINT "delayed_callId" FOREIGN KEY ("callId") REFERENCES "calls" ("callId") ON DELETE CASCADE ON UPDATE CASCADE
   );`,
+
+	// Index for fast lookup of delayed calls (critical for search performance with LEFT JOIN)
+	`CREATE INDEX IF NOT EXISTS "delayed_callId_idx" ON "delayed" ("callId");`,
 
 	`CREATE TABLE IF NOT EXISTS "dirwatches" (
     "dirwatchId" bigserial NOT NULL PRIMARY KEY,

@@ -1,5 +1,107 @@
 # Change log
 
+## Version 7.0 Beta 9.2 - Released TBD
+
+### Enhancements
+
+- **Enhanced API error logging with additional context (GitHub issue #88)**
+  - Root cause: API errors like "Invalid credentials" and "Incomplete call data: no talkgroup" provided no details about source IP, endpoint, or user agent
+  - Made troubleshooting difficult as admins couldn't identify where unauthorized access attempts or invalid API calls were coming from
+  - Fixed: Added new `exitWithErrorContext()` function that logs comprehensive request details (source IP, HTTP method, endpoint path, user agent)
+  - Handles proxy headers (X-Forwarded-For, X-Real-IP) to capture real client IP behind proxies/load balancers
+  - Updated critical API error paths: invalid credentials (login endpoints), incomplete call data (call upload)
+  - Also enhanced admin login logging for failed attempts, rate limiting, and localhost-only violations
+  - Logs now show format: "api: [error message] | IP=[client_ip] | Endpoint=[method path] | UserAgent=[agent]"
+  - Example: "api: Invalid credentials | IP=192.168.1.100 | Endpoint=POST /api/user/login | UserAgent=Mozilla/5.0..."
+  - Admin logs: "admin: Invalid login attempt | IP=127.0.0.1 | Endpoint=POST /api/admin/login | UserAgent=Chrome/120.0..."
+  - Admins can now identify problematic API clients, unauthorized access attempts, and misconfigured upload systems
+  - Files modified: server/api.go, server/admin.go
+
+### Bug Fixes
+
+- **Fixed system alerts not clearing on first click (GitHub issue #96)**
+  - Root cause: Frontend was using POST method but backend expected PUT for RESTful compliance
+  - Alert dismissal required multiple clicks to work, especially on busy servers
+  - Fixed: Updated backend to accept both POST and PUT methods for dismissing alerts
+  - Updated frontend to use PUT method as originally intended
+  - Files modified: server/admin.go, client/src/app/components/rdio-scanner/admin/admin.service.ts
+
+- **Fixed per-system no-audio alert settings not saving reliably**
+  - Root cause: Frontend was saving entire config JSON which caused race conditions on high-traffic servers (100+ calls/min)
+  - Saving per-system settings would fail intermittently due to concurrent config modifications
+  - Fixed: Added dedicated API endpoint `/api/admin/system-no-audio-settings` for atomic updates
+  - Now updates only the specific system's settings without loading/saving entire config
+  - Files modified: server/admin.go, server/main.go, client/src/app/components/rdio-scanner/admin/admin.service.ts, client/src/app/components/rdio-scanner/admin/system-health/system-health.component.ts
+
+- **Fixed double lossy audio conversion degrading transcription quality (GitHub issue #91)**
+  - Root cause: Audio was being converted twice through lossy codecs before transcription
+  - Original flow: SDRTrunk MP3 (16kbps) → Opus/AAC conversion → WAV conversion for transcription
+  - Each lossy conversion degrades audio quality, making transcription less accurate
+  - Tone detection was already using original audio (before Opus conversion), but transcription was not
+  - Fixed: Transcription now uses the original raw audio (MP3 from SDRTrunk) before Opus/AAC conversion
+  - This avoids double lossy conversion and provides same quality audio to transcription as tone detection gets
+  - New flow: SDRTrunk MP3 (16kbps) → WAV conversion for transcription (single conversion)
+  - Added `OriginalAudio` and `OriginalAudioMime` fields to Call struct and TranscriptionJob struct
+  - Controller stores original audio before encoding and passes it to transcription queue
+  - Transcription worker now uses original audio, falling back to converted audio if original unavailable
+  - Files modified: server/call.go, server/controller.go, server/transcription_queue.go
+
+- **Fixed talkgroup CSV import inserting talkgroups in reverse order**
+  - Root cause: CSV import component was using `unshift()` method which adds items to the beginning of the array
+  - When importing a CSV file, each talkgroup was prepended to the list, resulting in reverse order
+  - This made the talkgroups appear in opposite order from the CSV file when not sorting by ID or name
+  - Fixed: Changed `unshift()` to `push()` to append talkgroups in correct order
+  - Talkgroups now import in the same order as they appear in the CSV file
+  - Files modified: client/src/app/components/rdio-scanner/admin/tools/import-talkgroups/import-talkgroups.component.ts
+
+- **Fixed audio playback duplication when toggling channels during livefeed (GitHub issue #93)**
+  - Root cause: When user toggled systems/talkgroups in Channel Select while livefeed was running with backlog enabled, the client sent a new LivefeedMap to server
+  - Server's `ProcessMessageCommandLivefeedMap()` always called `sendAvailableCallsToClient()` on every LivefeedMap update
+  - This re-sent all backlog audio (e.g., 1 minute of prior calls) every time a channel was toggled
+  - With hundreds of calls in the backlog, the queue would fill with duplicate transmissions
+  - Fixed: Added `BacklogSent` flag to Client struct to track whether initial backlog has been sent for current livefeed session
+  - Server now only sends backlog on initial livefeed start (when transitioning from all-off to any-on state)
+  - Channel toggles during active livefeed no longer re-send backlog audio
+  - Flag resets when livefeed is fully stopped (all channels off), allowing backlog to be sent again on next livefeed start
+  - Users can now toggle channels without experiencing audio queue duplication
+  - Files modified: server/client.go, server/controller.go
+
+- **Fixed tag validation error when assigning manually created tags to talkgroups (GitHub issue #95)**
+  - Root cause: After saving config, Angular's change detection wasn't properly updating child components with fresh data containing database-assigned IDs
+  - When creating a new tag and saving, the server assigned an ID and returned the updated config, but form rebuilding with OnPush change detection didn't propagate to child components
+  - Tag dropdown would show newly created tags but without IDs, causing "Tag required" error when selected
+  - This only worked after manual browser refresh which fully reinitialized all components
+  - Fixed: Page now automatically reloads after save to ensure all components get fresh data with database-assigned IDs (same as manual refresh)
+  - Users can now create tags and immediately assign them after save completes
+  - Files modified: client/src/app/components/rdio-scanner/admin/config/config.component.ts, client/src/app/components/rdio-scanner/admin/config/config.component.html, client/src/app/components/rdio-scanner/admin/admin.service.ts, client/src/app/components/rdio-scanner/admin/config/systems/talkgroup/talkgroup.component.html
+
+- **Fixed FFmpeg version detection for FFmpeg 8.0+ (GitHub issue #92)**
+  - Root cause: Version detection regex only matched single-digit version numbers (e.g., 4.3)
+  - FFmpeg 8.0.1+ versions failed regex pattern `([0-9])` which only captures 0-9, not multi-digit numbers
+  - This caused server to incorrectly fall back to `dynaudnorm` filter instead of using `loudnorm` filter
+  - Users saw warning "FFmpeg 4.3+ required for loudnorm filter" despite having FFmpeg 8.0.1 installed
+  - Fixed: Updated regex pattern from `([0-9])\.([0-9])` to `([0-9]+)\.([0-9]+)` to match multi-digit versions
+  - Server now correctly detects FFmpeg 8.0.1, 10.2.1, and other multi-digit versions
+  - Audio normalization now uses proper `loudnorm` filter (EBU R128 standard) instead of fallback `dynaudnorm`
+  - Files modified: server/ffmpeg.go
+
+- **Fixed talkgroup blacklist not working properly**
+  - Root cause: Admin panel was using wrong field (`id` - database primary key) instead of `talkgroupRef` (radio reference ID) when adding to blacklist
+  - Server blacklist checking uses `talkgroupRef` to match incoming calls, but admin was storing database IDs in blacklist string
+  - This caused blacklisted talkgroups to persist and continue receiving calls after being blacklisted
+  - Fixed: Changed `blacklistTalkgroup()` method to use `talkgroup.value.talkgroupRef` instead of `talkgroup.value.id`
+  - Blacklisted talkgroups are now properly rejected when calls arrive
+  - Files modified: client/src/app/components/rdio-scanner/admin/config/systems/system/system.component.ts, rdio-scanner-master/client/src/app/components/rdio-scanner/admin/config/systems/system/system.component.ts
+
+- **Fixed talkgroup pagination breaking bulk actions (GitHub issue #97)**
+  - Root cause: Bulk action methods were using paginated indices (0-49 for each page) directly on the full talkgroups array
+  - When selecting talkgroups on page 2+, bulk actions (Assign Tag/Group) were applied to wrong talkgroups at those positions on page 1
+  - Example: Selecting item 5 on page 2 (actual index 55) would apply action to item 5 on page 1 (actual index 5)
+  - Fixed: Added `getFullTalkgroupIndex()` helper method to map paginated index to full array index
+  - Updated `toggleTalkgroupSelection()` and `isTalkgroupSelected()` to use full array indices for selection tracking
+  - Bulk actions now correctly apply to the talkgroups selected on any page
+  - Files modified: client/src/app/components/rdio-scanner/admin/config/systems/system/system.component.ts
+
 ## Version 7.0 Beta 9.1 - Released TBD
 
 ### Breaking Changes

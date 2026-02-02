@@ -29,21 +29,22 @@ import (
 )
 
 type Client struct {
-	User       *User
-	AuthCount  int
-	Controller *Controller
-	Conn       *websocket.Conn
-	Send       chan *Message
-	IsAdmin    bool // Set to true when authenticated with admin token
-	PinExpired bool // Set to true when user's PIN is expired
-	Systems    []System
-	GroupsData []Group
-	GroupsMap  GroupsMap
-	TagsData   []Tag
-	TagsMap    TagsMap
-	Livefeed   *Livefeed
-	SystemsMap SystemsMap
-	request    *http.Request
+	User              *User
+	AuthCount         int
+	Controller        *Controller
+	Conn              *websocket.Conn
+	Send              chan *Message
+	IsAdmin           bool // Set to true when authenticated with admin token
+	PinExpired        bool // Set to true when user's PIN is expired
+	BacklogSent       bool // Set to true after initial backlog has been sent (prevents resending on channel toggle)
+	Systems           []System
+	GroupsData        []Group
+	GroupsMap         GroupsMap
+	TagsData          []Tag
+	TagsMap           TagsMap
+	Livefeed          *Livefeed
+	SystemsMap        SystemsMap
+	request           *http.Request
 }
 
 func (client *Client) Init(controller *Controller, request *http.Request, conn *websocket.Conn) error {

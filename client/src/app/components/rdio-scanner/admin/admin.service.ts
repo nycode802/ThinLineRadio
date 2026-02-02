@@ -393,6 +393,7 @@ enum url {
     password = 'password',
     purge = 'purge',
     systemhealth = 'systemhealth',
+    systemNoAudioSettings = 'system-no-audio-settings',
     toneDetectionIssueThreshold = 'tone-detection-issue-threshold',
     noAudioThresholdMinutes = 'no-audio-threshold-minutes',
     noAudioMultiplier = 'no-audio-multiplier',
@@ -593,7 +594,8 @@ export class RdioScannerAdminService implements OnDestroy {
     async dismissSystemAlert(alertId: number): Promise<void> {
         try {
             // Use admin endpoint for dismissing alerts (uses admin token authentication)
-            await firstValueFrom(this.ngHttpClient.post(
+            // Backend expects PUT to /admin/systemhealth with alertId in body
+            await firstValueFrom(this.ngHttpClient.put(
                 this.getUrl(url.systemhealth),
                 { alertId },
                 { headers: this.getHeaders(), responseType: 'json' },
@@ -939,6 +941,23 @@ export class RdioScannerAdminService implements OnDestroy {
             this.errorHandler(error);
 
             return config;
+        }
+    }
+
+    async saveSystemNoAudioSettings(systemId: number, noAudioAlertsEnabled: boolean, noAudioThresholdMinutes: number): Promise<void> {
+        try {
+            await firstValueFrom(this.ngHttpClient.post(
+                this.getUrl(url.systemNoAudioSettings),
+                { 
+                    systemId,
+                    noAudioAlertsEnabled,
+                    noAudioThresholdMinutes
+                },
+                { headers: this.getHeaders(), responseType: 'json' },
+            ));
+        } catch (error) {
+            this.errorHandler(error);
+            throw error;
         }
     }
 
@@ -1545,13 +1564,33 @@ export class RdioScannerAdminService implements OnDestroy {
 
     private validateTag(): ValidatorFn {
         return (control: AbstractControl): ValidationErrors | null => {
+            // If no value selected, let the required validator handle it
+            if (control.value === null || control.value === undefined) {
+                return null;
+            }
+
+            // If value is not a number, it's invalid (but let other validators handle it)
             if (typeof control.value !== 'number') {
                 return null;
             }
 
-            const tagIds = control.root.get('tags')?.value.map((tag: Tag) => tag.id);
+            // Get all tag IDs from the config, filtering out undefined IDs (newly created tags)
+            const tagsFormArray = control.root.get('tags');
+            if (!tagsFormArray) {
+                // If tags array doesn't exist yet, allow any value
+                return null;
+            }
+            
+            const tags = tagsFormArray.value || [];
+            const tagIds = tags.map((tag: Tag) => tag.id).filter((id: number | undefined) => id !== undefined && id !== null);
 
-            return tagIds ? tagIds.includes(control.value) ? null : { required: true } : null;
+            // If tagIds array is empty, allow any value (tags not loaded yet)
+            if (!tagIds || tagIds.length === 0) {
+                return null;
+            }
+
+            // Check if the selected tagId exists in the list of valid tag IDs
+            return tagIds.includes(control.value) ? null : { required: true };
         };
     }
 

@@ -44,7 +44,9 @@ func NewFFMpeg() *FFMpeg {
 		ffmpeg.available = true
 
 		if l, err := stdout.ReadString('\n'); err == nil {
-			s := regexp.MustCompile(`.*ffmpeg version .{0,1}([0-9])\.([0-9])\.[0-9].*`).ReplaceAllString(strings.TrimSuffix(l, "\n"), "$1.$2")
+			// Updated regex to support multi-digit version numbers (e.g. FFmpeg 8.0, 8.0.1, 10.2.1, etc.)
+			// Patch version is optional to handle both "8.0" and "8.0.1" formats
+			s := regexp.MustCompile(`.*ffmpeg version .{0,1}([0-9]+)\.([0-9]+)(?:\.[0-9]+)?.*`).ReplaceAllString(strings.TrimSuffix(l, "\n"), "$1.$2")
 			v := strings.Split(s, ".")
 			if len(v) > 1 {
 				if major, err := strconv.Atoi(v[0]); err == nil {

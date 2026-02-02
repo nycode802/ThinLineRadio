@@ -207,7 +207,7 @@ func (admin *Admin) SystemHealthHandler(w http.ResponseWriter, r *http.Request) 
 			})
 		}
 
-	case http.MethodPost:
+	case http.MethodPost, http.MethodPut:
 		// Handle dismissing alerts via admin API
 		t := admin.GetAuthorization(r)
 		if !admin.ValidateToken(t) {
@@ -257,9 +257,9 @@ func (admin *Admin) TranscriptionFailuresHandler(w http.ResponseWriter, r *http.
 	case http.MethodGet:
 		// Get failed transcription calls with details
 		twentyFourHoursAgo := time.Now().Add(-24 * time.Hour).UnixMilli()
-		
+
 		query := fmt.Sprintf(`SELECT c."callId", c."systemId", c."talkgroupId", c."timestamp", c."transcriptionFailureReason", s."label" as "systemLabel", t."label" as "talkgroupLabel", t."name" as "talkgroupName" FROM "calls" c LEFT JOIN "systems" s ON s."systemId" = c."systemId" LEFT JOIN "talkgroups" t ON t."talkgroupId" = c."talkgroupId" WHERE c."transcriptionStatus" = 'failed' AND c."timestamp" >= %d ORDER BY c."timestamp" DESC LIMIT 100`, twentyFourHoursAgo)
-		
+
 		rows, err := admin.Controller.Database.Sql.Query(query)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
@@ -281,14 +281,14 @@ func (admin *Admin) TranscriptionFailuresHandler(w http.ResponseWriter, r *http.
 			}
 
 			callData := map[string]interface{}{
-				"callId": callId,
-				"systemId": systemId,
-				"talkgroupId": talkgroupId,
-				"timestamp": timestamp,
-				"systemLabel": "",
+				"callId":         callId,
+				"systemId":       systemId,
+				"talkgroupId":    talkgroupId,
+				"timestamp":      timestamp,
+				"systemLabel":    "",
 				"talkgroupLabel": "",
-				"talkgroupName": "",
-				"failureReason": "",
+				"talkgroupName":  "",
+				"failureReason":  "",
 			}
 
 			if systemLabel.Valid {
@@ -330,7 +330,7 @@ func (admin *Admin) TranscriptionFailuresHandler(w http.ResponseWriter, r *http.
 		var query string
 		var rowsAffected int64
 		var err error
-		
+
 		if len(request.CallIds) > 0 {
 			// Reset specific calls
 			callIdStrs := make([]string, len(request.CallIds))
@@ -584,7 +584,7 @@ func (admin *Admin) TranscriptionFailureThresholdHandler(w http.ResponseWriter, 
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
+			"success":   true,
 			"threshold": request.Threshold,
 		})
 
@@ -728,7 +728,7 @@ func (admin *Admin) NoAudioMultiplierHandler(w http.ResponseWriter, r *http.Requ
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":   true,
+			"success":    true,
 			"multiplier": request.Multiplier,
 		})
 
@@ -824,7 +824,7 @@ func (admin *Admin) SystemHealthAlertSettingsHandler(w http.ResponseWriter, r *h
 			"transcriptionFailureRepeatMinutes": admin.Controller.Options.TranscriptionFailureRepeatMinutes,
 			"toneDetectionRepeatMinutes":        admin.Controller.Options.ToneDetectionRepeatMinutes,
 			"noAudioRepeatMinutes":              admin.Controller.Options.NoAudioRepeatMinutes,
-			"alertRetentionDays":                 admin.Controller.Options.AlertRetentionDays,
+			"alertRetentionDays":                admin.Controller.Options.AlertRetentionDays,
 		})
 
 	case http.MethodPost:
@@ -927,6 +927,63 @@ func (admin *Admin) SystemHealthAlertSettingsHandler(w http.ResponseWriter, r *h
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
+}
+
+// SystemNoAudioSettingsHandler handles updating per-system no-audio alert settings
+func (admin *Admin) SystemNoAudioSettingsHandler(w http.ResponseWriter, r *http.Request) {
+	t := admin.GetAuthorization(r)
+	if !admin.ValidateToken(t) {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	if r.Method != http.MethodPost && r.Method != http.MethodPut {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	var request struct {
+		SystemId                uint `json:"systemId"`
+		NoAudioAlertsEnabled    bool `json:"noAudioAlertsEnabled"`
+		NoAudioThresholdMinutes uint `json:"noAudioThresholdMinutes"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "invalid request body",
+		})
+		return
+	}
+
+	// Find the system in the database
+	system, ok := admin.Controller.Systems.GetSystemById(uint64(request.SystemId))
+	if !ok || system == nil {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "system not found",
+		})
+		return
+	}
+
+	// Update the system settings
+	system.NoAudioAlertsEnabled = request.NoAudioAlertsEnabled
+	system.NoAudioThresholdMinutes = request.NoAudioThresholdMinutes
+
+	// Save to database
+	if err := admin.Controller.Systems.Write(admin.Controller.Database); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": fmt.Sprintf("failed to save system settings: %v", err),
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"message": "system no-audio settings updated successfully",
+	})
 }
 
 // CallAudioHandler serves call audio for admin playback
@@ -1455,6 +1512,8 @@ func (admin *Admin) ConfigHandler(w http.ResponseWriter, r *http.Request) {
 			}
 
 			// Handle users import
+			// Map imported userId -> actual userId (based on email matching)
+			userIdMap := make(map[uint64]uint64)
 			switch v := m["users"].(type) {
 			case []any:
 				// Only delete ALL existing users for full imports, not regular saves
@@ -1511,10 +1570,15 @@ func (admin *Admin) ConfigHandler(w http.ResponseWriter, r *http.Request) {
 						}
 					}
 
+					// Track imported userId for ID mapping
+					importedUserId := getUint64FromMap(userMap, "id")
 					// Check if user already exists
 					existingUser := admin.Controller.Users.GetUserByEmail(email)
 
 					if existingUser != nil {
+						if importedUserId != 0 {
+							userIdMap[importedUserId] = existingUser.Id
+						}
 						// Update existing user with imported data
 						existingUser.Password = password // Use imported password hash directly
 						existingUser.FirstName = getStringFromMap(userMap, "firstName")
@@ -1602,6 +1666,10 @@ func (admin *Admin) ConfigHandler(w http.ResponseWriter, r *http.Request) {
 
 						if err := admin.Controller.Users.SaveNewUser(user, admin.Controller.Database); err != nil {
 							logError(fmt.Errorf("failed to import new user %s: %v", email, err))
+						} else if importedUserId != 0 {
+							if createdUser := admin.Controller.Users.GetUserByEmail(email); createdUser != nil {
+								userIdMap[importedUserId] = createdUser.Id
+							}
 						}
 					}
 				}
@@ -1612,71 +1680,69 @@ func (admin *Admin) ConfigHandler(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 
-		// Handle keyword lists import
-		switch v := m["keywordLists"].(type) {
-		case []any:
-			// Only delete ALL existing keyword lists for full imports, not regular saves
-			if isFullImport {
-				// Delete ALL existing keyword lists first to ensure a clean import
-				_, err := admin.Controller.Database.Sql.Exec(`DELETE FROM "keywordLists"`)
-				if err != nil {
-					logError(fmt.Errorf("failed to delete existing keyword lists during import: %v", err))
-				}
-
-				// Import all keyword lists
-				for _, listData := range v {
-					listMap, ok := listData.(map[string]any)
-					if !ok {
-						continue
+			// Handle keyword lists import
+			switch v := m["keywordLists"].(type) {
+			case []any:
+				// Only delete ALL existing keyword lists for full imports, not regular saves
+				if isFullImport {
+					// Delete ALL existing keyword lists first to ensure a clean import
+					_, err := admin.Controller.Database.Sql.Exec(`DELETE FROM "keywordLists"`)
+					if err != nil {
+						logError(fmt.Errorf("failed to delete existing keyword lists during import: %v", err))
 					}
 
-					label, _ := listMap["label"].(string)
-					if label == "" {
-						continue
-					}
+					// Import all keyword lists
+					for _, listData := range v {
+						listMap, ok := listData.(map[string]any)
+						if !ok {
+							continue
+						}
 
-					description := getStringFromMap(listMap, "description")
-					order := uint(getFloat64FromMap(listMap, "order"))
-					createdAt := int64(getFloat64FromMap(listMap, "createdAt"))
-					if createdAt == 0 {
-						createdAt = time.Now().UnixMilli()
-					}
+						label, _ := listMap["label"].(string)
+						if label == "" {
+							continue
+						}
 
-					// Get keywords array
-					var keywords []string
-					if keywordsData, ok := listMap["keywords"].([]any); ok {
-						for _, kw := range keywordsData {
-							if k, ok := kw.(string); ok {
-								keywords = append(keywords, k)
+						description := getStringFromMap(listMap, "description")
+						order := uint(getFloat64FromMap(listMap, "order"))
+						createdAt := int64(getFloat64FromMap(listMap, "createdAt"))
+						if createdAt == 0 {
+							createdAt = time.Now().UnixMilli()
+						}
+
+						// Get keywords array
+						var keywords []string
+						if keywordsData, ok := listMap["keywords"].([]any); ok {
+							for _, kw := range keywordsData {
+								if k, ok := kw.(string); ok {
+									keywords = append(keywords, k)
+								}
 							}
 						}
-					}
 
-					keywordsJson, _ := json.Marshal(keywords)
+						keywordsJson, _ := json.Marshal(keywords)
 
-					// Insert keyword list using parameterized queries
-					if admin.Controller.Database.Config.DbType == DbTypePostgresql {
-						query := `INSERT INTO "keywordLists" ("label", "description", "keywords", "order", "createdAt") VALUES ($1, $2, $3, $4, $5) RETURNING "keywordListId"`
-						var listId uint64
-						if err := admin.Controller.Database.Sql.QueryRow(query, label, description, string(keywordsJson), order, createdAt).Scan(&listId); err != nil {
-							logError(fmt.Errorf("failed to import keyword list %s: %v", label, err))
-						}
-					} else {
-						query := `INSERT INTO "keywordLists" ("label", "description", "keywords", "order", "createdAt") VALUES (?, ?, ?, ?, ?)`
-						if _, err := admin.Controller.Database.Sql.Exec(query, label, description, string(keywordsJson), order, createdAt); err != nil {
-							logError(fmt.Errorf("failed to import keyword list %s: %v", label, err))
+						// Insert keyword list using parameterized queries
+						if admin.Controller.Database.Config.DbType == DbTypePostgresql {
+							query := `INSERT INTO "keywordLists" ("label", "description", "keywords", "order", "createdAt") VALUES ($1, $2, $3, $4, $5) RETURNING "keywordListId"`
+							var listId uint64
+							if err := admin.Controller.Database.Sql.QueryRow(query, label, description, string(keywordsJson), order, createdAt).Scan(&listId); err != nil {
+								logError(fmt.Errorf("failed to import keyword list %s: %v", label, err))
+							}
+						} else {
+							query := `INSERT INTO "keywordLists" ("label", "description", "keywords", "order", "createdAt") VALUES (?, ?, ?, ?, ?)`
+							if _, err := admin.Controller.Database.Sql.Exec(query, label, description, string(keywordsJson), order, createdAt); err != nil {
+								logError(fmt.Errorf("failed to import keyword list %s: %v", label, err))
+							}
 						}
 					}
 				}
 			}
-		}
 
-		// Handle user alert preferences import
-		switch v := m["userAlertPreferences"].(type) {
-		case []any:
-			// Only delete ALL existing user alert preferences for full imports, not regular saves
-			if isFullImport {
-				// Delete ALL existing user alert preferences first to ensure a clean import
+			// Handle user alert preferences import (map imported userId -> actual userId)
+			switch v := m["userAlertPreferences"].(type) {
+			case []any:
+				// Delete ALL existing user alert preferences first
 				_, err := admin.Controller.Database.Sql.Exec(`DELETE FROM "userAlertPreferences"`)
 				if err != nil {
 					logError(fmt.Errorf("failed to delete existing user alert preferences during import: %v", err))
@@ -1689,12 +1755,21 @@ func (admin *Admin) ConfigHandler(w http.ResponseWriter, r *http.Request) {
 						continue
 					}
 
-					userId := uint64(getFloat64FromMap(prefMap, "userId"))
+					importedUserId := uint64(getFloat64FromMap(prefMap, "userId"))
 					systemId := uint64(getFloat64FromMap(prefMap, "systemId"))
 					talkgroupId := uint64(getFloat64FromMap(prefMap, "talkgroupId"))
 
 					// Skip if essential fields are missing
-					if userId == 0 || systemId == 0 || talkgroupId == 0 {
+					if importedUserId == 0 || systemId == 0 || talkgroupId == 0 {
+						continue
+					}
+
+					actualUserId := importedUserId
+					if mappedId, ok := userIdMap[importedUserId]; ok {
+						actualUserId = mappedId
+					}
+
+					if admin.Controller.Users.GetUserById(actualUserId) == nil {
 						continue
 					}
 
@@ -1739,18 +1814,87 @@ func (admin *Admin) ConfigHandler(w http.ResponseWriter, r *http.Request) {
 					// Insert user alert preference using parameterized queries
 					if admin.Controller.Database.Config.DbType == DbTypePostgresql {
 						query := `INSERT INTO "userAlertPreferences" ("userId", "systemId", "talkgroupId", "alertEnabled", "toneAlerts", "keywordAlerts", "keywords", "keywordListIds", "toneSetIds") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`
-						if _, err := admin.Controller.Database.Sql.Exec(query, userId, systemId, talkgroupId, alertEnabled, toneAlerts, keywordAlerts, string(keywordsJson), string(keywordListIdsJson), string(toneSetIdsJson)); err != nil {
-							logError(fmt.Errorf("failed to import user alert preference for userId=%d, systemId=%d, talkgroupId=%d: %v", userId, systemId, talkgroupId, err))
+						if _, err := admin.Controller.Database.Sql.Exec(query, actualUserId, systemId, talkgroupId, alertEnabled, toneAlerts, keywordAlerts, string(keywordsJson), string(keywordListIdsJson), string(toneSetIdsJson)); err != nil {
+							logError(fmt.Errorf("failed to import user alert preference for userId=%d (mapped from %d), systemId=%d, talkgroupId=%d: %v", actualUserId, importedUserId, systemId, talkgroupId, err))
 						}
 					} else {
 						query := `INSERT INTO "userAlertPreferences" ("userId", "systemId", "talkgroupId", "alertEnabled", "toneAlerts", "keywordAlerts", "keywords", "keywordListIds", "toneSetIds") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-						if _, err := admin.Controller.Database.Sql.Exec(query, userId, systemId, talkgroupId, alertEnabled, toneAlerts, keywordAlerts, string(keywordsJson), string(keywordListIdsJson), string(toneSetIdsJson)); err != nil {
-							logError(fmt.Errorf("failed to import user alert preference for userId=%d, systemId=%d, talkgroupId=%d: %v", userId, systemId, talkgroupId, err))
+						if _, err := admin.Controller.Database.Sql.Exec(query, actualUserId, systemId, talkgroupId, alertEnabled, toneAlerts, keywordAlerts, string(keywordsJson), string(keywordListIdsJson), string(toneSetIdsJson)); err != nil {
+							logError(fmt.Errorf("failed to import user alert preference for userId=%d (mapped from %d), systemId=%d, talkgroupId=%d: %v", actualUserId, importedUserId, systemId, talkgroupId, err))
 						}
 					}
 				}
 			}
-		}
+
+			// Handle device tokens import (map imported userId -> actual userId)
+			switch v := m["deviceTokens"].(type) {
+			case []any:
+				// Delete ALL existing device tokens first
+				_, err := admin.Controller.Database.Sql.Exec(`DELETE FROM "deviceTokens"`)
+				if err != nil {
+					logError(fmt.Errorf("failed to delete existing device tokens during import: %v", err))
+				}
+
+				for _, tokenData := range v {
+					tokenMap, ok := tokenData.(map[string]any)
+					if !ok {
+						continue
+					}
+
+					importedUserId := uint64(getFloat64FromMap(tokenMap, "userId"))
+					token := getStringFromMap(tokenMap, "token")
+					if importedUserId == 0 || token == "" {
+						continue
+					}
+
+					actualUserId := importedUserId
+					if mappedId, ok := userIdMap[importedUserId]; ok {
+						actualUserId = mappedId
+					}
+					if admin.Controller.Users.GetUserById(actualUserId) == nil {
+						continue
+					}
+
+					platform := getStringFromMap(tokenMap, "platform")
+					sound := getStringFromMap(tokenMap, "sound")
+					createdAt := int64(getFloat64FromMap(tokenMap, "createdAt"))
+					lastUsed := int64(getFloat64FromMap(tokenMap, "lastUsed"))
+					if createdAt == 0 {
+						createdAt = time.Now().Unix()
+					}
+					if lastUsed == 0 {
+						lastUsed = createdAt
+					}
+
+					if admin.Controller.Database.Config.DbType == DbTypePostgresql {
+						query := `INSERT INTO "deviceTokens" ("userId", "token", "platform", "sound", "createdAt", "lastUsed") VALUES ($1, $2, $3, $4, $5, $6)`
+						if _, err := admin.Controller.Database.Sql.Exec(query, actualUserId, token, platform, sound, createdAt, lastUsed); err != nil {
+							logError(fmt.Errorf("failed to import device token for userId=%d (mapped from %d): %v", actualUserId, importedUserId, err))
+						}
+					} else {
+						query := `INSERT INTO "deviceTokens" ("userId", "token", "platform", "sound", "createdAt", "lastUsed") VALUES (?, ?, ?, ?, ?, ?)`
+						if _, err := admin.Controller.Database.Sql.Exec(query, actualUserId, token, platform, sound, createdAt, lastUsed); err != nil {
+							logError(fmt.Errorf("failed to import device token for userId=%d (mapped from %d): %v", actualUserId, importedUserId, err))
+						}
+					}
+				}
+
+				// Reload device tokens into memory
+				admin.Controller.DeviceTokens.mutex.Lock()
+				admin.Controller.DeviceTokens.tokens = make(map[uint64]*DeviceToken)
+				query := `SELECT "deviceTokenId", "userId", "token", "platform", "sound", "createdAt", "lastUsed" FROM "deviceTokens"`
+				rows, err := admin.Controller.Database.Sql.Query(query)
+				if err == nil {
+					defer rows.Close()
+					for rows.Next() {
+						var dt DeviceToken
+						if err := rows.Scan(&dt.Id, &dt.UserId, &dt.Token, &dt.Platform, &dt.Sound, &dt.CreatedAt, &dt.LastUsed); err == nil {
+							admin.Controller.DeviceTokens.tokens[dt.Id] = &dt
+						}
+					}
+				}
+				admin.Controller.DeviceTokens.mutex.Unlock()
+			}
 
 			// Emit config asynchronously to avoid blocking
 			go admin.Controller.EmitConfig()
@@ -2195,7 +2339,7 @@ func (admin *Admin) PurgeHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-			// Check if IDs are provided for selective deletion
+		// Check if IDs are provided for selective deletion
 		var ids []uint64
 		if idsInterface, ok := m["ids"].([]interface{}); ok {
 			for _, idInterface := range idsInterface {
@@ -2299,7 +2443,13 @@ func (admin *Admin) LoginHandler(w http.ResponseWriter, r *http.Request) {
 
 	if admin.Controller.Options.AdminLocalhostOnly {
 		if !isLocalhost {
-			log.Printf("Admin login attempt denied from non-localhost IP: %s", clientIP)
+			// Enhanced logging with request context
+			userAgent := r.Header.Get("User-Agent")
+			if userAgent == "" {
+				userAgent = "none"
+			}
+			admin.Controller.Logs.LogEvent(LogLevelWarn, fmt.Sprintf("admin: Admin login attempt denied from non-localhost IP | IP=%s | Endpoint=%s %s | UserAgent=%s",
+				clientIP, r.Method, r.URL.Path, userAgent))
 			w.WriteHeader(http.StatusForbidden)
 			json.NewEncoder(w).Encode(map[string]string{
 				"error": "Admin access restricted to localhost only",
@@ -2334,7 +2484,13 @@ func (admin *Admin) LoginHandler(w http.ResponseWriter, r *http.Request) {
 
 		if attempt.Count > admin.AttemptsMax || time.Since(attempt.Date) < admin.AttemptsMaxDelay {
 			if attempt.Count == admin.AttemptsMax+1 {
-				admin.Controller.Logs.LogEvent(LogLevelWarn, fmt.Sprintf("too many login attempts for ip=\"%v\"", remoteAddr))
+				// Enhanced logging with request context
+				userAgent := r.Header.Get("User-Agent")
+				if userAgent == "" {
+					userAgent = "none"
+				}
+				admin.Controller.Logs.LogEvent(LogLevelWarn, fmt.Sprintf("admin: Too many login attempts | IP=%s | Endpoint=%s %s | UserAgent=%s | AttemptCount=%d",
+					remoteAddr, r.Method, r.URL.Path, userAgent, attempt.Count))
 			}
 
 			w.WriteHeader(http.StatusUnauthorized)
@@ -2355,7 +2511,13 @@ func (admin *Admin) LoginHandler(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			// Record failed attempt
 			admin.Controller.LoginAttemptTracker.RecordFailedAttempt(remoteAddr)
-			admin.Controller.Logs.LogEvent(LogLevelWarn, fmt.Sprintf("invalid login attempt for ip %v", remoteAddr))
+			// Enhanced logging with request context
+			userAgent := r.Header.Get("User-Agent")
+			if userAgent == "" {
+				userAgent = "none"
+			}
+			admin.Controller.Logs.LogEvent(LogLevelWarn, fmt.Sprintf("admin: Invalid login attempt | IP=%s | Endpoint=%s %s | UserAgent=%s",
+				remoteAddr, r.Method, r.URL.Path, userAgent))
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
@@ -4566,13 +4728,13 @@ func (admin *Admin) UsersListHandler(w http.ResponseWriter, r *http.Request) {
 			// Only include tokens that have FCM tokens
 			if dt.FCMToken != "" {
 				fcmTokens = append(fcmTokens, map[string]interface{}{
-					"id":         dt.Id,
-					"fcmToken":   dt.FCMToken,
-					"pushType":   dt.PushType,
-					"platform":   dt.Platform,
-					"sound":      dt.Sound,
-					"createdAt":  time.Unix(dt.CreatedAt, 0).Format("2006-01-02 15:04:05 MST"),
-					"lastUsed":   time.Unix(dt.LastUsed, 0).Format("2006-01-02 15:04:05 MST"),
+					"id":        dt.Id,
+					"fcmToken":  dt.FCMToken,
+					"pushType":  dt.PushType,
+					"platform":  dt.Platform,
+					"sound":     dt.Sound,
+					"createdAt": time.Unix(dt.CreatedAt, 0).Format("2006-01-02 15:04:05 MST"),
+					"lastUsed":  time.Unix(dt.LastUsed, 0).Format("2006-01-02 15:04:05 MST"),
 				})
 			}
 		}
@@ -5237,4 +5399,63 @@ func (admin *Admin) HallucinationRejectHandler(w http.ResponseWriter, r *http.Re
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"message": "Suggestion rejected"})
+}
+
+// DeviceTokenDeleteHandler handles DELETE requests to delete a user's device token
+func (admin *Admin) DeviceTokenDeleteHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	t := admin.GetAuthorization(r)
+	if !admin.ValidateToken(t) {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	// Extract user ID and token ID from URL path
+	// Expected path: /api/admin/users/{userId}/device-tokens/{tokenId}
+	pathParts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if len(pathParts) < 6 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid URL format"})
+		return
+	}
+
+	userIDStr := pathParts[3]
+	tokenIDStr := pathParts[5]
+
+	userID, err := strconv.ParseUint(userIDStr, 10, 64)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid user ID format"})
+		return
+	}
+
+	tokenID, err := strconv.ParseUint(tokenIDStr, 10, 64)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid token ID format"})
+		return
+	}
+
+	// Verify the user exists
+	user := admin.Controller.Users.GetUserById(userID)
+	if user == nil {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"error": "User not found"})
+		return
+	}
+
+	// Delete the device token
+	if err := admin.Controller.DeviceTokens.Delete(tokenID, admin.Controller.Database); err != nil {
+		log.Printf("Failed to delete device token %d for user %d: %v", tokenID, userID, err)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to delete device token"})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"message": "Device token deleted successfully"})
 }

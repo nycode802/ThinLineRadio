@@ -74,7 +74,7 @@ export class RdioScannerAdminImportTalkgroupsComponent implements OnInit {
             const groupId = this.baseConfig.groups?.find((g) => g.label === csv[6])?.id;
             const tagId = this.baseConfig.tags?.find((t) => t.label === csv[5])?.id;
 
-            this.system?.talkgroups?.unshift({
+            this.system?.talkgroups?.push({
                 talkgroupRef: +csv[0],
                 label: csv[2],
                 name: csv[4],

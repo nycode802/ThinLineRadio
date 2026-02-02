@@ -269,6 +269,8 @@ func main() {
 
 	http.HandleFunc("/api/admin/systemhealth", wrapHandler(controller.Admin.requireLocalhost(controller.Admin.SystemHealthHandler)).ServeHTTP)
 
+	http.HandleFunc("/api/admin/system-no-audio-settings", wrapHandler(controller.Admin.requireLocalhost(controller.Admin.SystemNoAudioSettingsHandler)).ServeHTTP)
+
 	http.HandleFunc("/api/admin/transcription-failures", wrapHandler(controller.Admin.requireLocalhost(controller.Admin.TranscriptionFailuresHandler)).ServeHTTP)
 	http.HandleFunc("/api/admin/transcription-failure-threshold", wrapHandler(controller.Admin.requireLocalhost(controller.Admin.TranscriptionFailureThresholdHandler)).ServeHTTP)
 	http.HandleFunc("/api/admin/tone-detection-issue-threshold", wrapHandler(controller.Admin.requireLocalhost(controller.Admin.ToneDetectionIssueThresholdHandler)).ServeHTTP)
@@ -337,8 +339,12 @@ func main() {
 	http.HandleFunc("/api/admin/users", wrapHandler(controller.Admin.requireLocalhost(controller.Admin.UsersListHandler)).ServeHTTP)
 	http.HandleFunc("/api/admin/users/create", wrapHandler(controller.Admin.requireLocalhost(controller.Admin.UserCreateHandler)).ServeHTTP)
 	http.HandleFunc("/api/admin/users/", wrapHandler(controller.Admin.requireLocalhost(func(w http.ResponseWriter, r *http.Request) {
+		// Check if it's a device-tokens endpoint: /api/admin/users/{userId}/device-tokens/{tokenId}
+		pathParts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		if len(pathParts) >= 6 && pathParts[4] == "device-tokens" && r.Method == http.MethodDelete {
+			controller.Admin.DeviceTokenDeleteHandler(w, r)
 		// Check if it's a test-push endpoint
-		if strings.HasSuffix(r.URL.Path, "/test-push") && r.Method == http.MethodPost {
+		} else if strings.HasSuffix(r.URL.Path, "/test-push") && r.Method == http.MethodPost {
 			controller.Admin.UserTestPushHandler(w, r)
 		// Check if it's a reset-password endpoint
 		} else if strings.HasSuffix(r.URL.Path, "/reset-password") && r.Method == http.MethodPost {

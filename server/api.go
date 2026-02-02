@@ -198,7 +198,7 @@ func (api *Api) CallUploadHandler(w http.ResponseWriter, r *http.Request) {
 		if len(call.Audio) == 0 && call.SystemId > 0 && call.TalkgroupId == 0 && call.Timestamp.IsZero() {
 			// This is likely a test connection from SDRTrunk
 			// SDRTrunk expects this to fail with "Incomplete call data: no talkgroup" to consider it successful
-			// Log test connection details for debugging
+			// Log test connection details for debugging (no need for full error context since this is expected)
 			log.Printf("api: Test connection detected - SystemId=%d TalkgroupId=%d AudioLen=%d Timestamp=%v",
 				call.SystemId, call.TalkgroupId, len(call.Audio), call.Timestamp)
 			api.exitWithError(w, http.StatusExpectationFailed, "Incomplete call data: no talkgroup")
@@ -394,6 +394,42 @@ func (api *Api) TrunkRecorderCallUploadHandler(w http.ResponseWriter, r *http.Re
 func (api *Api) exitWithError(w http.ResponseWriter, status int, message string) {
 	api.Controller.Logs.LogEvent(LogLevelError, fmt.Sprintf("api: %s", message))
 
+	w.WriteHeader(status)
+	w.Write([]byte(fmt.Sprintf("%s\n", message)))
+}
+
+// exitWithErrorContext logs an error with additional context (IP, endpoint, user agent, etc.) and writes the error response
+func (api *Api) exitWithErrorContext(w http.ResponseWriter, r *http.Request, status int, message string) {
+	// Extract client IP (handle proxy headers)
+	clientIP := r.RemoteAddr
+	if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
+		// X-Forwarded-For can contain multiple IPs, take the first one
+		ips := strings.Split(forwarded, ",")
+		if len(ips) > 0 {
+			clientIP = strings.TrimSpace(ips[0])
+		}
+	} else if realIP := r.Header.Get("X-Real-IP"); realIP != "" {
+		clientIP = realIP
+	}
+
+	// Build detailed error message with context
+	userAgent := r.Header.Get("User-Agent")
+	if userAgent == "" {
+		userAgent = "none"
+	}
+
+	contextMsg := fmt.Sprintf("api: %s | IP=%s | Endpoint=%s %s | UserAgent=%s",
+		message,
+		clientIP,
+		r.Method,
+		r.URL.Path,
+		userAgent,
+	)
+
+	// Log with full context
+	api.Controller.Logs.LogEvent(LogLevelError, contextMsg)
+
+	// Write response (just the message, not the context details)
 	w.WriteHeader(status)
 	w.Write([]byte(fmt.Sprintf("%s\n", message)))
 }
@@ -840,7 +876,7 @@ func (api *Api) UserLoginHandler(w http.ResponseWriter, r *http.Request) {
 	if user == nil {
 		// Record failed attempt
 		api.Controller.LoginAttemptTracker.RecordFailedAttempt(clientIP)
-		api.exitWithError(w, http.StatusUnauthorized, "Invalid credentials")
+		api.exitWithErrorContext(w, r, http.StatusUnauthorized, "Invalid credentials")
 		return
 	}
 
@@ -848,7 +884,7 @@ func (api *Api) UserLoginHandler(w http.ResponseWriter, r *http.Request) {
 	if !user.VerifyPassword(request.Password) {
 		// Record failed attempt
 		api.Controller.LoginAttemptTracker.RecordFailedAttempt(clientIP)
-		api.exitWithError(w, http.StatusUnauthorized, "Invalid credentials")
+		api.exitWithErrorContext(w, r, http.StatusUnauthorized, "Invalid credentials")
 		return
 	}
 
@@ -4466,7 +4502,7 @@ func (api *Api) GroupAdminLoginHandler(w http.ResponseWriter, r *http.Request) {
 	if user == nil || !user.VerifyPassword(request.Password) {
 		// Record failed attempt
 		api.Controller.LoginAttemptTracker.RecordFailedAttempt(clientIP)
-		api.exitWithError(w, http.StatusUnauthorized, "Invalid credentials")
+		api.exitWithErrorContext(w, r, http.StatusUnauthorized, "Invalid credentials")
 		return
 	}
 

@@ -65,7 +65,7 @@
         <mat-form-field floatLabel="auto">
             <mat-select formControlName="tagId" placeholder="Tag">
                 <mat-option *ngFor="let tag of tags" [value]="tag.id">
-                    {{ tag.label }}
+                    {{ tag.label }} (ID: {{ tag.id }})
                 </mat-option>
             </mat-select>
             <mat-error *ngIf="form?.get('tagId')?.hasError('required')">

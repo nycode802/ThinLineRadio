@@ -25,13 +25,15 @@ import (
 
 // TranscriptionJob represents a job in the transcription queue
 type TranscriptionJob struct {
-	CallId      uint64
-	Audio       []byte
-	AudioMime   string
-	SystemId    uint64
-	TalkgroupId uint64
-	Priority    int // Higher priority processed first
-	Reasons     []string
+	CallId         uint64
+	Audio          []byte // Converted audio (Opus/AAC) - kept for backward compatibility
+	AudioMime      string // Converted audio mime type
+	OriginalAudio  []byte // Original raw audio before Opus/AAC conversion (preferred for transcription)
+	OriginalMime   string // Original audio mime type
+	SystemId       uint64
+	TalkgroupId    uint64
+	Priority       int // Higher priority processed first
+	Reasons        []string
 }
 
 // TranscriptionQueue manages transcription jobs with a worker pool
@@ -143,36 +145,45 @@ func (queue *TranscriptionQueue) worker(workerId int) {
 		// Update call status to processing
 		queue.updateCallTranscriptionStatus(job.CallId, "processing")
 
-		// Get the call to check if it has detected tones
-		call, err := queue.controller.Calls.GetCall(job.CallId)
-		audioToTranscribe := job.Audio
-		usedFilteredAudio := false
+	// Get the call to check if it has detected tones
+	call, err := queue.controller.Calls.GetCall(job.CallId)
+	
+	// Use original audio for transcription (avoids double lossy conversion MP3->Opus->WAV)
+	// Falls back to converted audio if original is not available
+	audioToTranscribe := job.OriginalAudio
+	audioMimeType := job.OriginalMime
+	if len(audioToTranscribe) == 0 {
+		// Fallback to converted audio if original not available
+		audioToTranscribe = job.Audio
+		audioMimeType = job.AudioMime
+	}
+	usedFilteredAudio := false
 
-		// LOCK PENDING TONES: Prevent new tones from merging while this call transcribes
-		// This prevents unrelated tones (from a different incident) from being attached to this voice call
-		if call != nil && call.System != nil && call.Talkgroup != nil {
-			key := fmt.Sprintf("%d:%d", call.System.Id, call.Talkgroup.Id)
-			queue.controller.pendingTonesMutex.Lock()
-			if pending, exists := queue.controller.pendingTones[key]; exists && pending != nil && !pending.Locked {
-				pending.Locked = true
-				queue.controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("transcription worker %d: locked pending tones for talkgroup %d (call %d transcribing)", workerId, call.Talkgroup.TalkgroupRef, job.CallId))
-			}
-			queue.controller.pendingTonesMutex.Unlock()
+	// LOCK PENDING TONES: Prevent new tones from merging while this call transcribes
+	// This prevents unrelated tones (from a different incident) from being attached to this voice call
+	if call != nil && call.System != nil && call.Talkgroup != nil {
+		key := fmt.Sprintf("%d:%d", call.System.Id, call.Talkgroup.Id)
+		queue.controller.pendingTonesMutex.Lock()
+		if pending, exists := queue.controller.pendingTones[key]; exists && pending != nil && !pending.Locked {
+			pending.Locked = true
+			queue.controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("transcription worker %d: locked pending tones for talkgroup %d (call %d transcribing)", workerId, call.Talkgroup.TalkgroupRef, job.CallId))
 		}
+		queue.controller.pendingTonesMutex.Unlock()
+	}
 
-		// UNIVERSAL TONE REMOVAL: Detect and remove ALL dispatch tones before transcription
-		// This prevents Whisper hallucinations even for tones that don't match configured tone sets
-		// or when tone detection is disabled for the talkgroup
-		queue.controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("transcription worker %d: scanning call %d for dispatch tones to remove", workerId, job.CallId))
+	// UNIVERSAL TONE REMOVAL: Detect and remove ALL dispatch tones before transcription
+	// This prevents Whisper hallucinations even for tones that don't match configured tone sets
+	// or when tone detection is disabled for the talkgroup
+	queue.controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("transcription worker %d: scanning call %d for dispatch tones to remove", workerId, job.CallId))
 
-		detectedTones, detectErr := queue.controller.ToneDetector.DetectAllTonesForTranscription(job.Audio, job.AudioMime)
+	detectedTones, detectErr := queue.controller.ToneDetector.DetectAllTonesForTranscription(audioToTranscribe, audioMimeType)
 		if detectErr != nil {
 			queue.controller.Logs.LogEvent(LogLevelWarn, fmt.Sprintf("transcription worker %d: tone detection failed for call %d: %v, proceeding with original audio", workerId, job.CallId, detectErr))
 		} else if len(detectedTones) > 0 {
-			queue.controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("transcription worker %d: call %d has %d dispatch tones, filtering before transcription", workerId, job.CallId, len(detectedTones)))
+		queue.controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("transcription worker %d: call %d has %d dispatch tones, filtering before transcription", workerId, job.CallId, len(detectedTones)))
 
-			// Calculate how much audio will remain after filtering
-			totalAudioDuration, durationErr := queue.controller.getAudioDuration(job.Audio, job.AudioMime)
+		// Calculate how much audio will remain after filtering
+		totalAudioDuration, durationErr := queue.controller.getAudioDuration(audioToTranscribe, audioMimeType)
 			totalToneDuration := 0.0
 			for _, tone := range detectedTones {
 				totalToneDuration += tone.Duration
@@ -206,8 +217,8 @@ func (queue *TranscriptionQueue) worker(workerId int) {
 					workerId, job.CallId, remainingDuration, minRemainingDuration))
 			}
 
-			// Remove the detected tones from audio
-			filteredAudio, filterErr := queue.controller.ToneDetector.RemoveTonesFromAudio(job.Audio, job.AudioMime, detectedTones)
+		// Remove the detected tones from audio
+		filteredAudio, filterErr := queue.controller.ToneDetector.RemoveTonesFromAudio(audioToTranscribe, audioMimeType, detectedTones)
 			if filterErr != nil {
 				// Filtering failed, use original audio
 				queue.controller.Logs.LogEvent(LogLevelWarn, fmt.Sprintf("transcription worker %d: audio filtering failed for call %d: %v, using original audio", workerId, job.CallId, filterErr))
@@ -225,12 +236,12 @@ func (queue *TranscriptionQueue) worker(workerId int) {
 			queue.controller.Logs.LogEvent(LogLevelInfo, fmt.Sprintf("transcription worker %d: no dispatch tones detected in call %d, using original audio", workerId, job.CallId))
 		}
 
-		// Transcribe audio (filtered if tones were present, original otherwise)
-		transcriptionOpts := TranscriptionOptions{
-			Language:      queue.controller.Options.TranscriptionConfig.Language,
-			InitialPrompt: queue.controller.Options.TranscriptionConfig.Prompt,
-			AudioMime:     job.AudioMime,
-		}
+	// Transcribe audio (filtered if tones were present, original otherwise)
+	transcriptionOpts := TranscriptionOptions{
+		Language:      queue.controller.Options.TranscriptionConfig.Language,
+		InitialPrompt: queue.controller.Options.TranscriptionConfig.Prompt,
+		AudioMime:     audioMimeType, // Use original audio MIME type
+	}
 
 		// Add word boost for AssemblyAI if configured
 		if queue.controller.Options.TranscriptionConfig.Provider == "assemblyai" {

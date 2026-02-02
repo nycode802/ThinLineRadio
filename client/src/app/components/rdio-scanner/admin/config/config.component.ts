@@ -23,6 +23,7 @@ import { MatExpansionPanel } from '@angular/material/expansion';
 import { AdminEvent, RdioScannerAdminService, Config } from '../admin.service';
 import { RdioScannerAdminUsersComponent } from './users/users.component';
 import { RdioScannerAdminUserGroupsComponent } from './user-groups/user-groups.component';
+import { Subscription } from 'rxjs';
 
 @Component({
     changeDetection: ChangeDetectionStrategy.OnPush,
@@ -37,6 +38,11 @@ export class RdioScannerAdminConfigComponent implements OnDestroy, OnInit {
     form: FormGroup | undefined;
     
     private isImportedForReview = false;
+    
+    // Track subscriptions to prevent memory leaks and duplicate subscriptions
+    private groupsSubscription?: Subscription;
+    private tagsSubscription?: Subscription;
+    private statusSubscription?: Subscription;
 
     get apikeys(): FormArray {
         return (this.form?.get('apikeys') as FormArray) || new FormArray([]);
@@ -113,6 +119,9 @@ export class RdioScannerAdminConfigComponent implements OnDestroy, OnInit {
 
     ngOnDestroy(): void {
         this.eventSubscription.unsubscribe();
+        this.groupsSubscription?.unsubscribe();
+        this.tagsSubscription?.unsubscribe();
+        this.statusSubscription?.unsubscribe();
     }
 
     async ngOnInit(): Promise<void> {
@@ -131,16 +140,21 @@ export class RdioScannerAdminConfigComponent implements OnDestroy, OnInit {
     }
 
     reset(config = this.config, options?: { dirty?: boolean, isImport?: boolean }): void {
+        // Unsubscribe from previous subscriptions to prevent duplicates
+        this.groupsSubscription?.unsubscribe();
+        this.tagsSubscription?.unsubscribe();
+        this.statusSubscription?.unsubscribe();
+        
         this.form = this.adminService.newConfigForm(config);
         
         // Track if this reset is from an "Import for Review"
         this.isImportedForReview = options?.isImport === true;
 
-        this.form.statusChanges.subscribe(() => {
+        this.statusSubscription = this.form.statusChanges.subscribe(() => {
             this.ngChangeDetectorRef.markForCheck();
         });
 
-        this.groups.valueChanges.subscribe(() => {
+        this.groupsSubscription = this.groups.valueChanges.subscribe(() => {
             this.systems.controls.forEach((system) => {
                 const talkgroups = system.get('talkgroups') as FormArray;
 
@@ -156,7 +170,7 @@ export class RdioScannerAdminConfigComponent implements OnDestroy, OnInit {
             });
         });
 
-        this.tags.valueChanges.subscribe(() => {
+        this.tagsSubscription = this.tags.valueChanges.subscribe(() => {
             this.systems.controls.forEach((system) => {
                 const talkgroups = system.get('talkgroups') as FormArray;
 
@@ -188,6 +202,20 @@ export class RdioScannerAdminConfigComponent implements OnDestroy, OnInit {
                 this.userGroupsComponent.loadGroups();
             }
         }, 0);
+        
+        // Force revalidation of all talkgroup tagIds after form is fully initialized
+        // Use a longer delay to ensure tags array is fully populated
+        setTimeout(() => {
+            this.systems.controls.forEach((system) => {
+                const talkgroups = system.get('talkgroups') as FormArray;
+                talkgroups.controls.forEach((talkgroup) => {
+                    const tagId = talkgroup.get('tagId') as FormControl;
+                    if (tagId && tagId.value) {
+                        tagId.updateValueAndValidity({ emitEvent: false });
+                    }
+                });
+            });
+        }, 100);
     }
 
     async save(): Promise<void> {
@@ -304,6 +332,12 @@ export class RdioScannerAdminConfigComponent implements OnDestroy, OnInit {
             formValue.options.relayServerURL = 'https://tlradioserver.thinlineds.com';
         }
 
-        await this.adminService.saveConfig(formValue, isFullImport);
+        const updatedConfig = await this.adminService.saveConfig(formValue, isFullImport);
+        
+        // Force a full page reload after save to ensure all database-assigned IDs are loaded
+        // This is the same as manual browser refresh which works correctly
+        if (updatedConfig) {
+            window.location.reload();
+        }
     }
 }

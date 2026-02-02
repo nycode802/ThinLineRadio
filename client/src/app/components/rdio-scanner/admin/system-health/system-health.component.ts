@@ -526,22 +526,18 @@ export class RdioScannerAdminSystemHealthComponent implements OnInit, OnDestroy 
 
     async saveSystemNoAudioSetting(system: any): Promise<void> {
         try {
-            // Load full config, update the specific system, and save
-            const config = await this.adminService.getConfig();
-            if (!config.systems) {
-                throw new Error('No systems found in configuration');
-            }
-            const systemIndex = config.systems.findIndex((s: any) => s.id === system.id);
-            if (systemIndex !== -1) {
-                config.systems[systemIndex] = system;
-                await this.adminService.saveConfig(config);
-                this.snackBar.open(`Updated no-audio settings for ${system.label}`, '', {
-                    duration: 2000,
-                    horizontalPosition: 'center',
-                    verticalPosition: 'bottom',
-                    panelClass: ['success-snackbar']
-                });
-            }
+            // Use dedicated endpoint to update just this system's settings
+            await this.adminService.saveSystemNoAudioSettings(
+                system.id,
+                system.noAudioAlertsEnabled || false,
+                system.noAudioThresholdMinutes || 30
+            );
+            this.snackBar.open(`Updated no-audio settings for ${system.label}`, '', {
+                duration: 2000,
+                horizontalPosition: 'center',
+                verticalPosition: 'bottom',
+                panelClass: ['success-snackbar']
+            });
         } catch (error: any) {
             console.error(`Failed to save system settings:`, error);
             this.snackBar.open(`Failed to save: ${error.message || 'Unknown error'}`, 'Close', {
